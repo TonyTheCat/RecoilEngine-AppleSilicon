@@ -92,7 +92,14 @@ if [ -f "$BUILD/CMakeCache.txt" ]; then
   fi
 fi
 
+# Real SDL2 when Homebrew's sdl2 is the sdl2-compat (SDL3) shim; see
+# build-sdl2.sh. Empty when Homebrew still provides a real SDL2.
+SDL2_PREFIX="$("$BAR/scripts/build-sdl2.sh")"
+CMAKE_EXTRA=()
+[ -n "$SDL2_PREFIX" ] && CMAKE_EXTRA+=(-DCMAKE_PREFIX_PATH="$SDL2_PREFIX") && echo "SDL2: $SDL2_PREFIX"
+
 cmake --fresh -S "$SRC" -B "$BUILD" -G Ninja \
+  ${CMAKE_EXTRA[@]+"${CMAKE_EXTRA[@]}"} \
   -DCMAKE_BUILD_TYPE=RELWITHDEBINFO \
   -DCMAKE_POLICY_VERSION_MINIMUM=3.5 \
   -DCMAKE_CXX_FLAGS_RELWITHDEBINFO="-O3 -g -DNDEBUG $PREFIX_MAP" \

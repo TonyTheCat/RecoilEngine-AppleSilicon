@@ -98,6 +98,12 @@ fi
 test -f "$DEPS/spirv-xlat-install/lib/pkgconfig/LLVMSPIRVLib.pc" || { echo "FATAL: spirv-xlat install missing"; exit 1; }
 echo "spirv-xlat OK"
 
+# libclc for the pinned Mesa: Homebrew's libclc 23+ no longer ships libclc.pc
+# or the spirv*-mesa3d- targets; build-libclc.sh builds LLVM 19's libclc when
+# needed and prints its pkg-config dir (empty when Homebrew's still works).
+CLC_PC="$("$BAR/scripts/build-libclc.sh")"
+[ -n "$CLC_PC" ] && echo "libclc: $CLC_PC" || echo "libclc: Homebrew"
+
 echo "=== [3/4] Mesa 26.2-devel (zink + kosmickrisp) @ $MESA_COMMIT + $NPATCH patches ==="
 if [ ! -d "$MESA_SRC/.git" ]; then
   git clone https://gitlab.freedesktop.org/mesa/mesa.git "$MESA_SRC"
@@ -166,7 +172,7 @@ STAGE="$DEPS/mesa-stage"
 
 rm -rf build-native "$STAGE"
 meson setup build-native --native-file "$DEPS/plain-native.ini" \
-  --pkg-config-path "$DEPS/spirv-xlat-install/lib/pkgconfig" \
+  --pkg-config-path "$DEPS/spirv-xlat-install/lib/pkgconfig${CLC_PC:+,$CLC_PC}" \
   -Dprefix="$NEUTRAL_PREFIX" -Dplatforms=macos \
   -Degl-native-platform=surfaceless -Degl=enabled -Dglx=disabled \
   -Dgallium-drivers=zink -Dvulkan-drivers=kosmickrisp \
