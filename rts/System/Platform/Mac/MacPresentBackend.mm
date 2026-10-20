@@ -102,10 +102,25 @@ bool PerfPinnedRenderSize(int& w, int& h)
 // harness relies on for phased A/B legs).
 std::atomic<int> presentDirect = {1};
 
+// MacUpscaler as configured, and whether the current render size was derived
+// with MacRenderScale < 1 (set by EffectiveBackingScale). MetalFX is engaged
+// only for a user-requested render scale: frames that are smaller than the
+// drawable for other reasons (SPRING_MAC_NO_RETINA, the hardware caps in
+// HardwareBackingScale) keep upstream's plain stretch, so MacRenderScale=1
+// presents exactly as before.
+std::atomic<int>  upscalerCfg  = {1};
+std::atomic<bool> renderScaled = {false};
+
+void ApplyUpscaler()
+{
+	MacMetalPresent_SetUpscaler(renderScaled.load(std::memory_order_relaxed) ? upscalerCfg.load(std::memory_order_relaxed) : 0);
+}
+
 struct PresentDirectObserver {
 	void ConfigNotify(const std::string& key, const std::string& value) {
 		if (key == "MacUpscaler") {
-			MacMetalPresent_SetUpscaler(atoi(value.c_str()));
+			upscalerCfg.store(atoi(value.c_str()), std::memory_order_relaxed);
+			ApplyUpscaler();
 			return;
 		}
 		presentDirect.store(atoi(value.c_str()), std::memory_order_relaxed);
@@ -514,7 +529,8 @@ bool CreateContext(SDL_Window* window)
 	// thread from ConfigHandler::Update, so mid-run flips still apply).
 	if (configHandler != nullptr) {
 		presentDirect.store(configHandler->GetInt("MacPresentDirect"), std::memory_order_relaxed);
-		MacMetalPresent_SetUpscaler(configHandler->GetInt("MacUpscaler"));
+		upscalerCfg.store(configHandler->GetInt("MacUpscaler"), std::memory_order_relaxed);
+		ApplyUpscaler();
 		configHandler->NotifyOnChange(&presentDirectObserver, {"MacPresentDirect", "MacUpscaler"});
 	}
 
@@ -614,6 +630,8 @@ double EffectiveBackingScale(SDL_Window* window)
 		return hw;
 
 	const double rs = std::clamp(double(configHandler->GetFloat("MacRenderScale")), 0.5, 1.0);
+	renderScaled.store(rs < 1.0, std::memory_order_relaxed);
+	ApplyUpscaler();
 	if (rs < 1.0) {
 		static double loggedRs = -1.0;
 		if (std::fabs(rs - loggedRs) > 1e-3) {
