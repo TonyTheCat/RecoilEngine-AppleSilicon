@@ -43,6 +43,8 @@
 #endif
 
 CONFIG(int, MacPresentDirect).defaultValue(1).minimumValue(0).maximumValue(1).description("macOS: present shader reads the readback ring directly from unified memory (0 = IOSurface staging path). Runtime-changeable so perf A/B legs can share one seeked process.");
+CONFIG(float, MacRenderScale).defaultValue(1.0f).minimumValue(0.5f).maximumValue(1.0f).description("macOS: fraction of the window's pixel resolution the game renders at (0.5-1.0). Below 1.0 the frame is upscaled to the window at present time (see MacUpscaler). Lower = faster readback and rendering. Applied at startup and on window resize.");
+CONFIG(int, MacUpscaler).defaultValue(1).minimumValue(0).maximumValue(1).description("macOS: how a frame rendered below window resolution is upscaled. 0 = plain stretch, 1 = MetalFX spatial upscaler (falls back to plain stretch if unavailable). Runtime-changeable.");
 
 // A truly zero-copy present (render the engine FBO directly into the
 // IOSurface that Metal samples — no readback at all) is blocked on Mesa
@@ -101,7 +103,11 @@ bool PerfPinnedRenderSize(int& w, int& h)
 std::atomic<int> presentDirect = {1};
 
 struct PresentDirectObserver {
-	void ConfigNotify(const std::string& /*key*/, const std::string& value) {
+	void ConfigNotify(const std::string& key, const std::string& value) {
+		if (key == "MacUpscaler") {
+			MacMetalPresent_SetUpscaler(atoi(value.c_str()));
+			return;
+		}
 		presentDirect.store(atoi(value.c_str()), std::memory_order_relaxed);
 	}
 };
@@ -508,7 +514,8 @@ bool CreateContext(SDL_Window* window)
 	// thread from ConfigHandler::Update, so mid-run flips still apply).
 	if (configHandler != nullptr) {
 		presentDirect.store(configHandler->GetInt("MacPresentDirect"), std::memory_order_relaxed);
-		configHandler->NotifyOnChange(&presentDirectObserver, {"MacPresentDirect"});
+		MacMetalPresent_SetUpscaler(configHandler->GetInt("MacUpscaler"));
+		configHandler->NotifyOnChange(&presentDirectObserver, {"MacPresentDirect", "MacUpscaler"});
 	}
 
 	// Set up the manual present path now that the layer + context exist.
@@ -594,7 +601,30 @@ void GetDrawableSize(int& w, int& h)
 //   SPRING_MAC_NO_RETINA=1    force 1x rendering (strongest, pre-existing)
 //   SPRING_MAC_FULL_BACKING=1 disable both caps (raw backing scale, i.e.
 //                             deliberate supersampling on scaled desktops)
+static double HardwareBackingScale(SDL_Window* window);
+
+// MacRenderScale: user-chosen fraction of the hardware-derived resolution.
+// The Metal present pass upscales the smaller frame to the drawable (MetalFX
+// spatial when MacUpscaler=1), and every pixel not rendered is also a pixel
+// not read back — the readback is the dominant per-frame cost on this port.
 double EffectiveBackingScale(SDL_Window* window)
+{
+	const double hw = HardwareBackingScale(window);
+	if (configHandler == nullptr)
+		return hw;
+
+	const double rs = std::clamp(double(configHandler->GetFloat("MacRenderScale")), 0.5, 1.0);
+	if (rs < 1.0) {
+		static double loggedRs = -1.0;
+		if (std::fabs(rs - loggedRs) > 1e-3) {
+			loggedRs = rs;
+			LOG("[EGL] MacRenderScale %.2f -> render scale %.3f (hardware %.3f)", rs, hw * rs, hw);
+		}
+	}
+	return hw * rs;
+}
+
+static double HardwareBackingScale(SDL_Window* window)
 {
 	if (getenv("SPRING_MAC_NO_RETINA") != nullptr)
 		return 1.0;

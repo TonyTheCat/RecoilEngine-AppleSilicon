@@ -87,6 +87,7 @@ CONFIG(int, MinimizeOnFocusLoss).defaultValue(0).minimumValue(0).maximumValue(1)
 // the safer default while fullscreen mode transitions are macOS's weakest
 // window-server path.
 CONFIG(bool, Fullscreen).defaultValue(false).headlessValue(false).description("Sets whether the game will run in fullscreen, as opposed to a window. For Windowed Fullscreen of Borderless Window, set this to 0, WindowBorderless to 1, and WindowPosX and WindowPosY to 0.");
+CONFIG(bool, MacGrabWindowed).defaultValue(true).description("macOS: also keep the cursor inside the game window in windowed mode (borderless/fullscreen are always confined). Released on cmd-tab, restored on focus; /grabinput toggles it in-game.");
 CONFIG(bool, WindowBorderless).defaultValue(false).description("When set and Fullscreen is 0, will put the game in Borderless Window mode, also known as Windowed Fullscreen. When using this, it is generally best to also set WindowPosX and WindowPosY to 0");
 CONFIG(bool, BlockCompositing).defaultValue(false).safemodeValue(true).description("Disables kwin compositing to fix tearing, possible fixes low FPS in windowed mode, too.");
 // setting this as default 0 for now is because if the frame were to be dropped for being late, DWMFlush will force the compositor to use the framebuffer. This can result in blocking until the framebuffer can be composited (up to 1 frame) and may not be desirable for all use cases (specifically with vsync set to off). However, only more widespread testing and investigation across various hardware/os configs would tell us what advantage DWMFlush would bring.
@@ -1706,9 +1707,11 @@ void CGlobalRendering::SetWindowAttributes(SDL_Window* window)
 	// grab is released automatically on focus loss, so cmd-tab still frees the
 	// cursor; it is re-asserted on focus regain (see SpringApp). Windowed and the
 	// visreg fixed window are never confined.
-	SetWindowInputGrabbing(macWantFullscreen);
+	// MacGrabWindowed extends the confinement to plain windowed mode.
+	const bool macWantGrab = macWantFullscreen || (!macFixedWindow && configHandler->GetBool("MacGrabWindowed"));
+	SetWindowInputGrabbing(macWantGrab);
 	LOG("[GR::%s][macgrab] cursor confinement want=%d got=%d", __func__,
-	    int(macWantFullscreen), int(GetWindowInputGrabbing()));
+	    int(macWantGrab), int(GetWindowInputGrabbing()));
 #endif
 }
 
