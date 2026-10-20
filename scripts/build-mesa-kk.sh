@@ -228,7 +228,12 @@ ls "$MESA_PREFIX/share/vulkan/icd.d/" 2>/dev/null || true
 # silently misses debug-map/symbol-table paths.
 leaks=0
 for d in "$MESA_PREFIX"/lib/*.dylib; do
-  hits="$(LC_ALL=C grep -a -o '/Users/[^ "]\{0,120\}' "$d" 2>/dev/null | sort -u || true)"
+  # LC_ALL=C on sort too: in a UTF-8 locale sort aborts on the raw bytes grep
+  # captures ("Illegal byte sequence") and the scan silently sees nothing.
+  # Skip "$MESA_PREFIX/lib/..." strings: those are the install names repointed
+  # above, which release-build.sh rewrites to @rpath and audits in the bundle.
+  hits="$(LC_ALL=C grep -a -o '/Users/[^ "]\{0,120\}' "$d" 2>/dev/null | LC_ALL=C sort -u \
+          | LC_ALL=C grep -v -F "$MESA_PREFIX/lib/" || true)"
   [ -z "$hits" ] || { n=$(echo "$hits" | wc -l | tr -d ' '); echo "FATAL: $(basename "$d") embeds $n /Users/ path(s):"; echo "$hits" | head -5 | sed 's/^/    /'; leaks=$((leaks+n)); }
 done
 [ "$leaks" -eq 0 ] || { echo "FATAL: driver embeds $leaks builder-path string(s) — see LESSON-41"; exit 1; }

@@ -527,7 +527,9 @@ echo "debug symbol tables stripped from bundled Mach-Os"
 # the text section by default and silently misses debug-map paths (LESSON-41).
 PATHLEAK_FAIL=0
 while IFS= read -r m; do
-  hits="$(LC_ALL=C grep -a -o '/Users/[^ "]\{0,120\}' "$m" 2>/dev/null | sort -u || true)"
+  # LC_ALL=C on sort too, or a UTF-8 locale makes it abort on raw bytes
+  # ("Illegal byte sequence") and the audit silently passes
+  hits="$(LC_ALL=C grep -a -o '/Users/[^ "]\{0,120\}' "$m" 2>/dev/null | LC_ALL=C sort -u || true)"
   if [ -n "$hits" ]; then
     echo "FATAL: ${m#"$APP"/} embeds $(echo "$hits" | wc -l | tr -d ' ') builder path(s):"
     echo "$hits" | head -5 | sed 's/^/    /'
