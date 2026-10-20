@@ -42,6 +42,9 @@ fi
   done
   echo; echo "==== Fontconfig ===="
   cat "$(brewdir fontconfig)/COPYING" 2>/dev/null || echo "(see fontconfig source COPYING)"
+  # current Homebrew freetype links brotli (decoder for WOFF2 fonts)
+  echo; echo "==== brotli ===="
+  cat "$(brewdir brotli)/LICENSE" 2>/dev/null || echo "(see brotli source LICENSE)"
 } > "$DEST/MIT-collection.txt"
 
 # BSD-3 collection
