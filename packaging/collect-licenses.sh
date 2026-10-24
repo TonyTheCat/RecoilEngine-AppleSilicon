@@ -6,7 +6,11 @@ set -euo pipefail
 
 DEST=${1:?dest dir}
 BAR="${BAR:-$(cd "$(dirname "$0")/.." && pwd)}"
-SRC="${ENGINE_SRC:-$BAR/engine-2025.06.24}"
+# Engine source: what the caller packaged (release-build.sh passes ENGINE_SRC),
+# else the same derivation release-build.sh uses. This was hardcoded to
+# $BAR/engine-2025.06.24, a tree that no longer exists, so a clean checkout
+# failed here on the engine's own COPYING.
+SRC="${ENGINE_SRC:-$([ -d "$BAR/rts" ] && echo "$BAR" || echo "$BAR/engine")}"
 mkdir -p "$DEST"
 fail=0
 
