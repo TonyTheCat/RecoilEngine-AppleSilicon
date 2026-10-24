@@ -778,8 +778,11 @@ elif [ "$REPLAY_SMOKE" = "1" ]; then
   SMOKELOG=$(mktemp)
   SMOKEDIR=$(mktemp -d)
   mkdir -p "$SMOKEDIR/rapid"   # skip the first-run lobby download
+  # stock macOS has no timeout(1); Homebrew coreutils provides gtimeout
+  TIMEOUT_BIN=$(command -v timeout || command -v gtimeout) \
+    || { echo "FATAL: neither timeout nor gtimeout found (brew install coreutils)"; exit 1; }
   BAR_WRITEDIR_OVERRIDE="$SMOKEDIR" BAR_CONTENT_SCOPE=lobby BAR_ASSUME_CONSENT=1 \
-    timeout 90 "$APP/Contents/MacOS/launcher" \
+    "$TIMEOUT_BIN" 90 "$APP/Contents/MacOS/launcher" \
     > "$SMOKELOG" 2>&1 || true
   if grep -q "KOSMICKRISP_LOADED" "$SMOKELOG" "$SMOKEDIR/infolog.txt" 2>/dev/null; then
     echo "bundle GUI smoke: KosmicKrisp identity verified"

@@ -71,10 +71,12 @@ fi
 
 echo "=== [1/4] Homebrew dependencies ==="
 # Engine deps + Mesa build deps. Individually so one failure doesn't kill the rest.
+# cmake/ninja: SPIRV-LLVM-Translator below and the engine build. gcc@15:
+# gcc-dbl64-swap.sh. coreutils: gtimeout for build-engine.sh's libm gate.
 for pkg in sdl2 libpng libjpeg-turbo libogg libvorbis freetype glm libomp \
            vulkan-headers vulkan-loader molten-vk devil ccache \
            meson pkg-config bison flex llvm@19 libclc glslang spirv-tools \
-           p7zip openal-soft minizip; do
+           p7zip openal-soft minizip cmake ninja gcc@15 coreutils; do
   brew list "$pkg" &>/dev/null || brew install "$pkg" || echo "WARN: brew install $pkg failed"
 done
 
