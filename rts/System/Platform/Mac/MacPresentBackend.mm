@@ -31,6 +31,7 @@
 #include "System/Config/ConfigHandler.h"
 #include "System/Log/ILog.h"
 #include "System/Misc/SpringTime.h"
+#include "System/TimeProfiler.h"
 
 // SPRING_MAC_DIAGNOSTICS compiles in the heavier macOS diagnostics (headless
 // frame capture, per-frame present timing, raw-frame dumps, the present
@@ -1102,10 +1103,16 @@ bool DirectPresentFrame(int rdW, int rdH, GLenum readFormat, int lagFrames)
 		return false;
 	}
 
-	glBindFramebuffer(GL_READ_FRAMEBUFFER, 0);
+	// Sub-timers of Misc::SwapBuffers: they record only while the profiler is
+	// on (/debug, or SPRING_HITCH_LOG), and let a [hitch] line say whether a
+	// slow swap was the pack, the GPU-behind wait, or the Metal present.
 	const int cur = (int)(dpFrame % DP_RING);
-	glBindBuffer(GL_PIXEL_PACK_BUFFER, dpPBO[cur]);
-	glReadPixels(0, 0, rdW, rdH, readFormat, GL_UNSIGNED_BYTE, nullptr);
+	{
+		SCOPED_TIMER("Misc::SwapBuffers::MacPack");
+		glBindFramebuffer(GL_READ_FRAMEBUFFER, 0);
+		glBindBuffer(GL_PIXEL_PACK_BUFFER, dpPBO[cur]);
+		glReadPixels(0, 0, rdW, rdH, readFormat, GL_UNSIGNED_BYTE, nullptr);
+	}
 	// a silently-failing pack presents stale frames (the async-copy flicker
 	// class); packing into a PERSISTENT map is legal, but verify early on
 	if (dpFrame < 100) {
@@ -1133,34 +1140,39 @@ bool DirectPresentFrame(int rdW, int rdH, GLenum readFormat, int lagFrames)
 		// stale glass. Smoothness is the product, so the wait stays; the
 		// copy removal is still a win everywhere the GPU keeps up.
 		int old = (int)((dpFrame - lagFrames) % DP_RING);
-		if (dpFence[old] != nullptr &&
-		    glClientWaitSync(dpFence[old], GL_SYNC_FLUSH_COMMANDS_BIT, 0) == GL_TIMEOUT_EXPIRED) {
-			static uint64_t fenceWaits = 0;
-			++fenceWaits;
-			// L_INFO, not L_WARNING: this fires whenever the GPU render can't keep
-			// the frame budget (a normal perf symptom on a heavy scene, not an
-			// error). At L_WARNING it spammed the on-screen console; keep it in the
-			// log (rate-limited to powers of two) for perf diagnosis only.
-			if ((fenceWaits & (fenceWaits - 1)) == 0) // log 1,2,4,8,...
-				LOG_L(L_INFO, "[MacPresent] lag-%d pack fence not signaled — waiting (GPU behind, x%llu)",
-				        lagFrames, (unsigned long long)fenceWaits);
-			if (glClientWaitSync(dpFence[old], GL_SYNC_FLUSH_COMMANDS_BIT, 100000000ull) == GL_TIMEOUT_EXPIRED) {
-				// pathological (>100ms): use the newest COMPLETED older slot
-				// instead of reading a buffer mid-write; skip if none
-				old = -1;
-				for (int k = lagFrames + 1; k <= (int)std::min<long>(dpFrame, DP_RING - 2); ++k) {
-					const int cand = (int)((dpFrame - k) % DP_RING);
-					if (dpFence[cand] == nullptr ||
-					    glClientWaitSync(dpFence[cand], GL_SYNC_FLUSH_COMMANDS_BIT, 0) != GL_TIMEOUT_EXPIRED) {
-						old = cand;
-						break;
+		{
+			SCOPED_TIMER("Misc::SwapBuffers::MacFenceWait");
+			if (dpFence[old] != nullptr &&
+			    glClientWaitSync(dpFence[old], GL_SYNC_FLUSH_COMMANDS_BIT, 0) == GL_TIMEOUT_EXPIRED) {
+				static uint64_t fenceWaits = 0;
+				++fenceWaits;
+				// L_INFO, not L_WARNING: this fires whenever the GPU render can't keep
+				// the frame budget (a normal perf symptom on a heavy scene, not an
+				// error). At L_WARNING it spammed the on-screen console; keep it in the
+				// log (rate-limited to powers of two) for perf diagnosis only.
+				if ((fenceWaits & (fenceWaits - 1)) == 0) // log 1,2,4,8,...
+					LOG_L(L_INFO, "[MacPresent] lag-%d pack fence not signaled — waiting (GPU behind, x%llu)",
+					        lagFrames, (unsigned long long)fenceWaits);
+				if (glClientWaitSync(dpFence[old], GL_SYNC_FLUSH_COMMANDS_BIT, 100000000ull) == GL_TIMEOUT_EXPIRED) {
+					// pathological (>100ms): use the newest COMPLETED older slot
+					// instead of reading a buffer mid-write; skip if none
+					old = -1;
+					for (int k = lagFrames + 1; k <= (int)std::min<long>(dpFrame, DP_RING - 2); ++k) {
+						const int cand = (int)((dpFrame - k) % DP_RING);
+						if (dpFence[cand] == nullptr ||
+						    glClientWaitSync(dpFence[cand], GL_SYNC_FLUSH_COMMANDS_BIT, 0) != GL_TIMEOUT_EXPIRED) {
+							old = cand;
+							break;
+						}
 					}
 				}
 			}
 		}
-		if (old >= 0)
+		if (old >= 0) {
+			SCOPED_TIMER("Misc::SwapBuffers::MacMetalPresent");
 			presented = MacMetalPresent_PresentPixelBuffer(dpMap[old], dpAllocBytes, rdW, rdH,
 			                                               readFormat == GL_RGBA, true);
+		}
 	}
 	glBindBuffer(GL_PIXEL_PACK_BUFFER, 0);
 
