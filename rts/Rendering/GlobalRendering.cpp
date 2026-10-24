@@ -805,15 +805,39 @@ void CGlobalRendering::SwapBuffers(bool allowSwapBuffers, bool clearErrors)
 	// backend collapses these structurally-identical lines into periodic
 	// "repeated N more time(s)" rollups (no ad-hoc throttle needed here).
 	// Disable with SPRING_NO_STALL_LOG=1.
+	//
+	// Hitch attribution: SPRING_HITCH_LOG=<ms> (support/debug escape hatch, off
+	// by default) turns the profiler on and, for every frame longer than <ms>
+	// (default 50 when the value is not a number), logs which profiler timers
+	// took the longest single call during that frame, e.g. "Sim::GameFrame=61.2
+	// Lua::Callins::Synced=40.3 Misc::SwapBuffers=12.0". Visible stutters on
+	// Apple-class hardware are mostly 50-150ms, below the stall threshold, and
+	// the stall line alone cannot say whether sim, Lua, draw or present ate the
+	// time. Nested timers both appear (parent includes child).
 	{
 		static const bool s_stallLog = (getenv("SPRING_NO_STALL_LOG") == nullptr);
+		static const float s_hitchMs = [] {
+			const char* v = getenv("SPRING_HITCH_LOG");
+			if (v == nullptr)
+				return 0.0f;
+
+			const float ms = static_cast<float>(atof(v));
+			CTimeProfiler::GetInstance().SetEnabled(true);
+			return (ms > 1.0f) ? ms : 50.0f;
+		}();
 		const spring_time nowST = spring_now();
-		if (s_stallLog && lastSwapBuffersEnd.toMilliSecsi() > 0) {
+		if (lastSwapBuffersEnd.toMilliSecsi() > 0) {
 			const float gapMs = (nowST - lastSwapBuffersEnd).toMilliSecsf();
-			if (gapMs > 150.0f) {
+			if (s_stallLog && gapMs > 150.0f) {
 				static uint32_t s_stallCount = 0;
 				++s_stallCount;
 				LOG_L(L_WARNING, "[stall] draw gap %.0fms (drawFrame=%u, stalls=%u)", gapMs, drawFrame, s_stallCount);
+			}
+			if (s_hitchMs > 0.0f) {
+				// collect every frame so the next one starts from zero
+				const std::string timers = CTimeProfiler::GetInstance().CollectHitchTimers(s_hitchMs * 0.2f, 8);
+				if (gapMs > s_hitchMs)
+					LOG_L(L_WARNING, "[hitch] frame %.0fms (drawFrame=%u): %s", gapMs, drawFrame, timers.c_str());
 			}
 		}
 	}
