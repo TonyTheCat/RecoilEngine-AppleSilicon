@@ -325,7 +325,21 @@ if [ "$PROFILE" = "bar" ]; then
   # from the canonical dist_cfg the official launcher uses; the launcher deploys
   # these at runtime (see launcher.sh). Without chobby_config.json the lobby
   # black-screens (game=generic -> Chobby shuts down).
-  python3 "$PKG/extract-launcher-config.py" "$BAR/chobby/dist_cfg/config.json" "$RESOURCES" \
+  # A local BYAR-Chobby checkout at $BAR/chobby wins; otherwise fetch the one
+  # file from the commit pinned in ship-config.sh (a fresh clone has no chobby/).
+  DIST_CFG="$BAR/chobby/dist_cfg/config.json"
+  if [ ! -f "$DIST_CFG" ]; then
+    DIST_CFG="$BAR/deps/chobby-dist_cfg-$SHIP_CHOBBY_COMMIT.json"
+    if [ ! -s "$DIST_CFG" ]; then
+      mkdir -p "$BAR/deps"
+      curl -fsSL --retry 3 -o "$DIST_CFG.tmp" \
+        "https://raw.githubusercontent.com/beyond-all-reason/BYAR-Chobby/$SHIP_CHOBBY_COMMIT/dist_cfg/config.json" \
+        && mv "$DIST_CFG.tmp" "$DIST_CFG" \
+        || { rm -f "$DIST_CFG.tmp"; echo "FATAL: could not fetch BYAR-Chobby dist_cfg @ $SHIP_CHOBBY_COMMIT"; exit 1; }
+    fi
+    echo "dist_cfg: BYAR-Chobby @ $SHIP_CHOBBY_COMMIT"
+  fi
+  python3 "$PKG/extract-launcher-config.py" "$DIST_CFG" "$RESOURCES" \
     || { echo "FATAL: could not extract BAR launcher config from dist_cfg"; exit 1; }
   # BAR_CONTENT_TAGS: DIAGNOSTIC ONLY. Overrides the rapid tags the bundle
   # downloads (normally byar:test + byar-chobby:test, i.e. exactly what the
