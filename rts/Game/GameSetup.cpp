@@ -11,6 +11,7 @@
 #include "System/Cpp11Compat.hpp"
 #include "System/FileSystem/ArchiveScanner.h"
 #include "System/FileSystem/RapidHandler.h"
+#include "System/Config/ConfigHandler.h"
 #include "System/SpringHash.h"
 #include "System/Log/ILog.h"
 
@@ -21,6 +22,8 @@
 #include <fstream>
 
 #include "System/Misc/TracyDefs.h"
+
+CONFIG(std::string, Mutators).defaultValue("").description("Archive names, separated by ';', mounted as mutators on top of every game after any the start script lists. Lobbies never write GAME\\MUTATOR<n>, so this is how a local single-player mod gets loaded.");
 
 CR_BIND(CGameSetup,)
 CR_REG_METADATA(CGameSetup, (
@@ -309,6 +312,20 @@ void CGameSetup::LoadMutators(const TdfParser& file, std::vector<std::string>& m
 			break;
 
 		mutatorsList.push_back(s);
+	}
+
+	const std::string configured = configHandler->GetString("Mutators");
+
+	for (size_t begin = 0; begin <= configured.size(); ) {
+		const size_t end = std::min(configured.find(';', begin), configured.size());
+		const std::string name = StringTrim(configured.substr(begin, end - begin));
+		begin = end + 1;
+
+		if (name.empty() || std::find(mutatorsList.begin(), mutatorsList.end(), name) != mutatorsList.end())
+			continue;
+
+		LOG("[GameSetup::%s] mutator \"%s\" from the Mutators setting", __func__, name.c_str());
+		mutatorsList.push_back(name);
 	}
 }
 
