@@ -2341,6 +2341,7 @@ int LuaSyncedCtrl::SetUnitTooltip(lua_State* L)
  * @field capture number? Set the unit's capture progress.
  * @field paralyze number? Set the unit's paralyze damage.
  * @field build number? Set the unit's build progress.
+ * @field resetDecay boolean? Count this call as construction work so a frame built from Lua does not decay (`constructionDecay`; gameplay branch only).
  */
 
 /***
@@ -2370,10 +2371,23 @@ int LuaSyncedCtrl::SetUnitHealth(lua_State* L)
 		constexpr int tableIdx = 2;
 
 		for (lua_pushnil(L); lua_next(L, tableIdx) != 0; lua_pop(L, 1)) {
-			if (!lua_israwstring(L, LUA_TABLE_KEY_INDEX) || !lua_isnumber(L, LUA_TABLE_VALUE_INDEX))
+			if (!lua_israwstring(L, LUA_TABLE_KEY_INDEX))
 				continue;
 
-			switch (hashString(lua_tolstring(L, LUA_TABLE_KEY_INDEX, nullptr))) {
+			const uint32_t keyHash = hashString(lua_tolstring(L, LUA_TABLE_KEY_INDEX, nullptr));
+
+			// gameplay branch: a gadget that builds a frame itself (no builder
+			// unit) passes resetDecay = true so constructionDecay does not start
+			if (keyHash == hashString("resetDecay")) {
+				if (lua_toboolean(L, LUA_TABLE_VALUE_INDEX))
+					unit->lastNanoAdd = gs->frameNum;
+				continue;
+			}
+
+			if (!lua_isnumber(L, LUA_TABLE_VALUE_INDEX))
+				continue;
+
+			switch (keyHash) {
 				case hashString("health"): {
 					unit->health = std::min(unit->maxHealth, lua_tofloat(L, LUA_TABLE_VALUE_INDEX));
 				} break;
