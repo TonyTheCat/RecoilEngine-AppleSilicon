@@ -59,6 +59,14 @@ test -f "$OPENAL_LIB" || { echo "FATAL: openal-soft missing"; exit 1; }
 # and inherited by subprojects (streflop, pr-downloader). Path-string only — no
 # effect on codegen or determinism.
 PREFIX_MAP="-ffile-prefix-map=$BAR=. -fdebug-prefix-map=$BAR=."
+# An ENGINE_BUILD outside $BAR (a build cache that outlives worktrees) is not
+# covered by the map above: the AI wrapper archives then embed it as their
+# DWARF compile dir and the packaging scan refuses them (LESSON-41). Map it to
+# the path an in-tree build has, so both layouts embed the same strings.
+case "$BUILD/" in
+  "$BAR"/*) ;;
+  *) PREFIX_MAP="$PREFIX_MAP -ffile-prefix-map=$BUILD=./build-engine -fdebug-prefix-map=$BUILD=./build-engine" ;;
+esac
 # The pr-downloader subproject deliberately wipes CMAKE_CXX_FLAGS/CMAKE_C_FLAGS
 # (tools/CMakeLists.txt) so it does NOT inherit engine flags — that also drops
 # PREFIX_MAP, leaving ~17 absolute source paths embedded in pr-downloader (and,
