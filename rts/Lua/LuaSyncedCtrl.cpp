@@ -2391,10 +2391,6 @@ int LuaSyncedCtrl::SetUnitHealth(lua_State* L)
 					}
 				} break;
 				case hashString("build"): {
-					// Lua setting build progress is construction work too: a
-					// frame a gadget builds must not start decaying 9 s in
-					unit->lastNanoAdd = gs->frameNum;
-
 					if ((unit->buildProgress = lua_tofloat(L, LUA_TABLE_VALUE_INDEX)) >= 1.0f)
 						unit->FinishedBuilding(false);
 					else
