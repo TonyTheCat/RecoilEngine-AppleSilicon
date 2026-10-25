@@ -626,14 +626,30 @@ set_source_files_properties(
 	PROPERTIES GENERATED TRUE
 )
 
-# Find git metadata files to depend on, so version regenerates when commits change
+# Find git metadata files to depend on, so version regenerates when commits change.
+# Ask git for the real git dir: in a worktree .git is a file pointing elsewhere, and
+# .git/index and .git/HEAD do not exist, so the version files were never regenerated.
 if(EXISTS "${CMAKE_SOURCE_DIR}/.git")
-	if(EXISTS "${CMAKE_SOURCE_DIR}/.git/index")
-		list(APPEND VERSION_GIT_DEPS "${CMAKE_SOURCE_DIR}/.git/index")
+	execute_process(
+		COMMAND "${GIT_EXECUTABLE}" rev-parse --absolute-git-dir
+		WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
+		OUTPUT_VARIABLE VERSION_GIT_DIR
+		OUTPUT_STRIP_TRAILING_WHITESPACE
+		ERROR_QUIET
+	)
+	if(NOT VERSION_GIT_DIR)
+		set(VERSION_GIT_DIR "${CMAKE_SOURCE_DIR}/.git")
 	endif()
-	if(EXISTS "${CMAKE_SOURCE_DIR}/.git/HEAD")
-		list(APPEND VERSION_GIT_DEPS "${CMAKE_SOURCE_DIR}/.git/HEAD")
+	if(EXISTS "${VERSION_GIT_DIR}/index")
+		list(APPEND VERSION_GIT_DEPS "${VERSION_GIT_DIR}/index")
 	endif()
+	if(EXISTS "${VERSION_GIT_DIR}/HEAD")
+		list(APPEND VERSION_GIT_DEPS "${VERSION_GIT_DIR}/HEAD")
+	endif()
+endif()
+# A pinned version (ConfigureVersion.cmake) must regenerate when it is added or changed
+if(EXISTS "${CMAKE_SOURCE_DIR}/PINNED_VERSION")
+	list(APPEND VERSION_GIT_DEPS "${CMAKE_SOURCE_DIR}/PINNED_VERSION")
 endif()
 
 # Declare template files as inputs (for proper dependency tracking)

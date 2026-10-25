@@ -2341,7 +2341,6 @@ int LuaSyncedCtrl::SetUnitTooltip(lua_State* L)
  * @field capture number? Set the unit's capture progress.
  * @field paralyze number? Set the unit's paralyze damage.
  * @field build number? Set the unit's build progress.
- * @field resetDecay boolean? Count this call as construction work so a frame built from Lua does not decay (`constructionDecay`).
  */
 
 /***
@@ -2396,13 +2395,6 @@ int LuaSyncedCtrl::SetUnitHealth(lua_State* L)
 						unit->FinishedBuilding(false);
 					else
 						unit->TurnIntoNanoframe();
-				} break;
-				case hashString("resetDecay"): {
-					// opt-in: a gadget that builds a frame itself (no builder
-					// unit) marks the work, so constructionDecay does not start;
-					// callers that never pass it simulate exactly as upstream
-					if (lua_toboolean(L, LUA_TABLE_VALUE_INDEX))
-						unit->lastNanoAdd = gs->frameNum;
 				} break;
 				default: {
 				} break;
