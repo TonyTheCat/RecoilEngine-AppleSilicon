@@ -39,7 +39,9 @@ fi
 # MIT collection: mesa + vendored MIT components, concatenated with headers
 {
   echo "==== Mesa (Zink, KosmicKrisp) ===="
-  cat "$BAR/deps/mesa-src/docs/license.rst" 2>/dev/null || cat "$BAR/deps/mesa-src/LICENSE" 2>/dev/null || { echo "MESA LICENSE MISSING"; exit 1; }
+  # same default as build-mesa-kk.sh; a build cache outside the tree passes MESA_SRC
+  MESA_SRC="${MESA_SRC:-$BAR/deps/mesa-src}"
+  cat "$MESA_SRC/docs/license.rst" 2>/dev/null || cat "$MESA_SRC/LICENSE" 2>/dev/null || { echo "MESA LICENSE MISSING"; exit 1; }
   for c in lua fmt lunasvg smmalloc; do
     f=$(find "$SRC/rts/lib/$c" -maxdepth 2 -iname "LICENSE*" -o -maxdepth 2 -iname "COPYING*" 2>/dev/null | head -1)
     [ -n "$f" ] && { echo; echo "==== $c ===="; cat "$f"; }
