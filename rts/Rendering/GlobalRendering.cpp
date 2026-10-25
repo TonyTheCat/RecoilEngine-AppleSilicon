@@ -60,6 +60,7 @@ CONFIG(bool, DebugGLReportGroups).defaultValue(false).description("Show OpenGL P
 
 CONFIG(int, GLContextMajorVersion).defaultValue(3).minimumValue(3).maximumValue(4);
 CONFIG(int, GLContextMinorVersion).defaultValue(0).minimumValue(0).maximumValue(5);
+CONFIG(int, HitchLogMs).defaultValue(0).minimumValue(0).description("Log every frame longer than this many ms with the profiler timers that took the longest (0 = off). The SPRING_HITCH_LOG environment variable overrides it.");
 CONFIG(int, MSAALevel).defaultValue(0).minimumValue(0).maximumValue(32).description("Enables multisample anti-aliasing; 'level' is the number of samples used.");
 CONFIG(float, MinSampleShadingRate).defaultValue(0.0f).minimumValue(0.0f).maximumValue(1.0f).description("A value of 1.0 indicates that each sample in the framebuffer should be independently shaded. A value of 0.0 effectively allows the GL to ignore sample rate shading. Any value between 0.0 and 1.0 allows the GL to shade only a subset of the total samples within each covered fragment.");
 
@@ -806,7 +807,7 @@ void CGlobalRendering::SwapBuffers(bool allowSwapBuffers, bool clearErrors)
 	// "repeated N more time(s)" rollups (no ad-hoc throttle needed here).
 	// Disable with SPRING_NO_STALL_LOG=1.
 	//
-	// Hitch attribution: SPRING_HITCH_LOG=<ms> (support/debug escape hatch, off
+	// Hitch attribution: SPRING_HITCH_LOG=<ms> or the HitchLogMs setting (off
 	// by default) turns the profiler on and, for every frame longer than <ms>
 	// (default 50 when the value is not a number), logs which profiler timers
 	// took the longest single call during that frame, e.g. "Sim::GameFrame=61.2
@@ -817,11 +818,13 @@ void CGlobalRendering::SwapBuffers(bool allowSwapBuffers, bool clearErrors)
 	{
 		static const bool s_stallLog = (getenv("SPRING_NO_STALL_LOG") == nullptr);
 		static const float s_hitchMs = [] {
+			// the environment variable for one-off runs, the HitchLogMs setting
+			// for a player who keeps it on
 			const char* v = getenv("SPRING_HITCH_LOG");
-			if (v == nullptr)
+			const float ms = (v != nullptr)? static_cast<float>(atof(v)): static_cast<float>(configHandler->GetInt("HitchLogMs"));
+			if (v == nullptr && ms <= 0.0f)
 				return 0.0f;
 
-			const float ms = static_cast<float>(atof(v));
 			CTimeProfiler::GetInstance().SetEnabled(true);
 			return (ms > 1.0f) ? ms : 50.0f;
 		}();
