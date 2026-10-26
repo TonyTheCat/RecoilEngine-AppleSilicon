@@ -24,6 +24,8 @@
 #include "Sim/Units/UnitTypes/Building.h"
 #include "Sim/Units/UnitTypes/Factory.h"
 #include "Sim/Units/CommandAI/BuilderCaches.h"
+#include "Sim/Weapons/Weapon.h"
+#include "Sim/Weapons/WeaponDef.h"
 #include "System/SpringMath.h"
 #include "System/StringUtil.h"
 #include "System/EventHandler.h"
@@ -33,6 +35,19 @@
 #include "Rendering/Models/3DModel.hpp"
 
 #include "System/Misc/TracyDefs.h"
+
+#define LOG_SECTION_BUILDER_SAFETY "BuilderSafety"
+LOG_REGISTER_SECTION_GLOBAL(LOG_SECTION_BUILDER_SAFETY)
+
+// Builder self-preservation (gameplay branch, see GAMEPLAY.md). An enemy
+// threatens a point within its longest weapon range that can hit the builder,
+// plus THREAT_MARGIN. Ranges are clamped to THREAT_RANGE_CAP: long-range
+// artillery reaches everyone, and counting all of it would stop every builder
+// near the front. A radar dot never seen in LOS counts as armed with
+// THREAT_DEFAULT_RANGE. Smart Builders (bar-widgets) uses the same numbers.
+static constexpr float THREAT_MARGIN = 100.0f;
+static constexpr float THREAT_RANGE_CAP = 700.0f;
+static constexpr float THREAT_DEFAULT_RANGE = 500.0f;
 
 
 CR_BIND_DERIVED(CBuilderCAI ,CMobileCAI , )
@@ -53,6 +68,7 @@ CR_REG_METADATA(CBuilderCAI , (
 	CR_MEMBER(lastPC1),
 	CR_MEMBER(lastPC2),
 	CR_MEMBER(lastPC3),
+	CR_IGNORED(lastThreatLogKey),
 	CR_POSTLOAD(PostLoad),
 	CR_PREALLOC(GetPreallocContainer)
 ))
@@ -88,7 +104,8 @@ CBuilderCAI::CBuilderCAI():
 	lastPC1(-1),
 	lastPC2(-1),
 	lastPC3(-1),
-	range3D(true)
+	range3D(true),
+	lastThreatLogKey(-1)
 {}
 
 CBuilderCAI::CBuilderCAI(CUnit* owner):
@@ -101,7 +118,8 @@ CBuilderCAI::CBuilderCAI(CUnit* owner):
 	lastPC1(-1),
 	lastPC2(-1),
 	lastPC3(-1),
-	range3D(owner->unitDef->buildRange3D)
+	range3D(owner->unitDef->buildRange3D),
+	lastThreatLogKey(-1)
 {
 	ownerBuilder = static_cast<CBuilder*>(owner);
 
@@ -516,6 +534,9 @@ void CBuilderCAI::SlowUpdate()
 		FinishCommand();
 		return;
 	}
+
+	if (AbandonThreatenedJob(c))
+		return;
 
 	switch (c.GetID()) {
 		case CMD_STOP:      { ExecuteStop(c);      return; }
@@ -1014,7 +1035,16 @@ void CBuilderCAI::ExecuteReclaim(Command& c)
 				if (recEnemyOnly) recopt |= REC_ENEMYONLY;
 				if (recSpecial)   recopt |= REC_SPECIAL;
 
-				const int rid = FindReclaimTarget(pos, radius, c.GetOpts(), recopt, curdist);
+				// a fight/patrol job does not switch to a closer target under fire
+				Threats threats;
+				Threats* jobThreats = nullptr;
+				if (tempOrder && !owner->immobile) {
+					threats.patrol = (NextPatrolPoint(1) != nullptr);
+					CollectThreats(pos, radius + owner->pos.distance2D(pos), threats);
+					jobThreats = &threats;
+				}
+
+				const int rid = FindReclaimTarget(pos, radius, c.GetOpts(), recopt, curdist, jobThreats);
 				if ((rid > 0) && (rid != uid)) {
 					StopMoveAndFinishCommand();
 					CBuilderCaches::RemoveUnitFromReclaimers(owner);
@@ -1269,8 +1299,21 @@ void CBuilderCAI::ExecuteFight(Command& c)
 
 	const float searchRadius = (owner->immobile ? 0.0f : (300.0f * owner->moveState)) + ownerBuilder->buildDistance;
 
+	// self-preservation: a builder that can walk away does (turrets cannot)
+	Threats threats;
+	Threats* searchThreats = nullptr;
+	if (!owner->immobile) {
+		threats.patrol = (c.IsInternalOrder() && NextPatrolPoint(0) != nullptr);
+		CollectThreats(curPosOnLine, searchRadius + owner->pos.distance2D(curPosOnLine), threats);
+		searchThreats = &threats;
+
+		if (EndThreatenedPatrolLeg(c, threats))
+			return;
+	}
+
 	// Priority 1: Repair
-	if (!reclaimEnemyOnlyMode && (ownerDef->canRepair || ownerDef->canAssist) && FindRepairTargetAndRepair(curPosOnLine, searchRadius, c.GetOpts(), true, resurrectMode)){
+	if (!reclaimEnemyOnlyMode && (ownerDef->canRepair || ownerDef->canAssist) && FindRepairTargetAndRepair(curPosOnLine, searchRadius, c.GetOpts(), true, resurrectMode, searchThreats)){
+		LogThreatSkips(threats);
 		tempOrder = true;
 		inCommand = CMD_STOP;
 
@@ -1283,7 +1326,8 @@ void CBuilderCAI::ExecuteFight(Command& c)
 	}
 
 	// Priority 2: Resurrect (optional)
-	if (!reclaimEnemyOnlyMode && resurrectMode && ownerDef->canResurrect && FindResurrectableFeatureAndResurrect(curPosOnLine, searchRadius, c.GetOpts(), false)) {
+	if (!reclaimEnemyOnlyMode && resurrectMode && ownerDef->canResurrect && FindResurrectableFeatureAndResurrect(curPosOnLine, searchRadius, c.GetOpts(), false, searchThreats)) {
+		LogThreatSkips(threats);
 		tempOrder = true;
 		inCommand = CMD_STOP;
 
@@ -1296,7 +1340,8 @@ void CBuilderCAI::ExecuteFight(Command& c)
 	}
 
 	// Priority 3: Reclaim / reclaim non resurrectable (optional) / reclaim enemy units (optional)
-	if (ownerDef->canReclaim && FindReclaimTargetAndReclaim(curPosOnLine, searchRadius, c.GetOpts(), recopt)) {
+	if (ownerDef->canReclaim && FindReclaimTargetAndReclaim(curPosOnLine, searchRadius, c.GetOpts(), recopt, searchThreats)) {
+		LogThreatSkips(threats);
 		tempOrder = true;
 		inCommand = CMD_STOP;
 
@@ -1307,6 +1352,8 @@ void CBuilderCAI::ExecuteFight(Command& c)
 
 		return;
 	}
+
+	LogThreatSkips(threats);
 
 	if (f3SqDist(owner->pos, pos) < Square(64.0f)) {
 		StopMoveAndFinishCommand();
@@ -1395,7 +1442,7 @@ bool CBuilderCAI::ReclaimObject(CSolidObject* object) {
 }
 
 
-int CBuilderCAI::FindReclaimTarget(const float3& pos, float radius, unsigned char cmdopt, ReclaimOption recoptions, float bestStartDist) const
+int CBuilderCAI::FindReclaimTarget(const float3& pos, float radius, unsigned char cmdopt, ReclaimOption recoptions, float bestStartDist, Threats* threats) const
 {
 	RECOIL_DETAILED_TRACY_ZONE;
 	const bool noResCheck   = recoptions & REC_NORESCHECK;
@@ -1435,6 +1482,9 @@ int CBuilderCAI::FindReclaimTarget(const float3& pos, float radius, unsigned cha
 			const float dist = f3SqDist(u->pos, owner->pos);
 			if (dist < bestDist || (!stationary && !u->IsMoving())) {
 				if (owner->immobile && !IsInBuildRange(u))
+					continue;
+
+				if (SkipThreatenedTarget(u, u->id, threats))
 					continue;
 
 				if (!stationary && !u->IsMoving())
@@ -1483,6 +1533,9 @@ int CBuilderCAI::FindReclaimTarget(const float3& pos, float radius, unsigned cha
 				if (CBuilderCaches::IsFeatureBeingResurrected(f->id, owner))
 					continue;
 
+				if (SkipThreatenedTarget(f, unitHandler.MaxUnits() + f->id, threats))
+					continue;
+
 				metal |= (recSpecial && !metal && f->defResources.metal > 0.0f);
 
 				bestDist = dist;
@@ -1503,10 +1556,10 @@ int CBuilderCAI::FindReclaimTarget(const float3& pos, float radius, unsigned cha
 //  Area searches
 //
 
-bool CBuilderCAI::FindReclaimTargetAndReclaim(const float3& pos, float radius, unsigned char cmdopt, ReclaimOption recoptions)
+bool CBuilderCAI::FindReclaimTargetAndReclaim(const float3& pos, float radius, unsigned char cmdopt, ReclaimOption recoptions, Threats* threats)
 {
 	RECOIL_DETAILED_TRACY_ZONE;
-	const int rid = FindReclaimTarget(pos, radius, cmdopt, recoptions);
+	const int rid = FindReclaimTarget(pos, radius, cmdopt, recoptions, 1.0e30f, threats);
 
 	if (rid < 0)
 		return false;
@@ -1526,7 +1579,8 @@ bool CBuilderCAI::FindResurrectableFeatureAndResurrect(
 	const float3& pos,
 	float radius,
 	unsigned char options,
-	bool freshOnly
+	bool freshOnly,
+	Threats* threats
 ) {
 	RECOIL_DETAILED_TRACY_ZONE;
 	QuadFieldQuery qfQuery;
@@ -1552,6 +1606,9 @@ bool CBuilderCAI::FindResurrectableFeatureAndResurrect(
 				continue;
 
 			if (!(options & CONTROL_KEY) && CBuilderCaches::IsFeatureBeingReclaimed(f->id, owner))
+				continue;
+
+			if (SkipThreatenedTarget(f, unitHandler.MaxUnits() + f->id, threats))
 				continue;
 
 			bestDist = dist;
@@ -1630,7 +1687,8 @@ bool CBuilderCAI::FindRepairTargetAndRepair(
 	float radius,
 	unsigned char options,
 	bool attackEnemy,
-	bool builtOnly
+	bool builtOnly,
+	Threats* threats
 ) {
 	RECOIL_DETAILED_TRACY_ZONE;
 	QuadFieldQuery qfQuery;
@@ -1687,6 +1745,9 @@ bool CBuilderCAI::FindRepairTargetAndRepair(
 					if (!(options & CONTROL_KEY) && CBuilderCaches::IsUnitBeingReclaimed(unit, owner))
 						continue;
 
+					if (SkipThreatenedTarget(unit, unit->id, threats))
+						continue;
+
 					stationary |= (!stationary && !unit->IsMoving());
 
 					bestDist = dist;
@@ -1738,6 +1799,222 @@ bool CBuilderCAI::FindRepairTargetAndRepair(
 	return true;
 }
 
+
+
+/******************************************************************************/
+//
+//  Self-preservation (gameplay branch)
+//
+
+const CBuilderCAI::Threats::Threat* CBuilderCAI::Threats::Covering(const float3& pos) const
+{
+	for (const Threat& t: list) {
+		if (pos.SqDistance2D(t.pos) < Square(t.range + THREAT_MARGIN))
+			return &t;
+	}
+
+	return nullptr;
+}
+
+
+void CBuilderCAI::CollectThreats(const float3& center, float radius, Threats& threats) const
+{
+	RECOIL_DETAILED_TRACY_ZONE;
+	threats.list.clear();
+
+	QuadFieldQuery qfQuery;
+	quadField.GetUnitsExact(qfQuery, center, radius + THREAT_RANGE_CAP + THREAT_MARGIN, false);
+
+	for (const CUnit* u: *qfQuery.units) {
+		if (teamHandler.Ally(owner->allyteam, u->allyteam) || u->IsNeutral() || u->beingBuilt)
+			continue;
+
+		const uint8_t los = u->losStatus[owner->allyteam];
+
+		if (!(los & (LOS_INLOS | LOS_INRADAR)))
+			continue;
+
+		float range = THREAT_DEFAULT_RANGE;
+
+		// a type seen in LOS is known: count only its weapons that can hit the builder
+		if (los & (LOS_INLOS | LOS_PREVLOS)) {
+			range = 0.0f;
+
+			for (const CWeapon* w: u->weapons) {
+				if (w->weaponDef->isShield || w->weaponDef->interceptor != 0)
+					continue;
+				if ((w->onlyTargetCategory & owner->category) == 0)
+					continue;
+
+				range = std::max(range, w->range);
+			}
+
+			if (range <= 0.0f)
+				continue;
+		}
+
+		threats.list.push_back({u->pos, std::min(range, THREAT_RANGE_CAP), u->id});
+	}
+
+	threats.builderThreatened = (threats.Covering(owner->pos) != nullptr);
+}
+
+
+// A target under fire is only worked from where the builder already stands,
+// and on patrol only while the builder itself is out of fire.
+bool CBuilderCAI::SkipThreatenedTarget(const CWorldObject* target, int targetID, Threats* threats) const
+{
+	if (threats == nullptr)
+		return false;
+
+	const Threats::Threat* t = threats->Covering(target->pos);
+
+	if (t == nullptr)
+		return false;
+	if (IsInBuildRange(target) && !(threats->patrol && threats->builderThreatened))
+		return false;
+
+	if (threats->skipped++ == 0) {
+		threats->firstSkippedID = targetID;
+		threats->firstSkippedBy = *t;
+	}
+
+	return true;
+}
+
+
+// ExecutePatrol pushes an internal FIGHT for each leg and PushOrUpdateReturnFight
+// may put a 6-param one in front of it; the PATROL behind them is the next leg.
+const Command* CBuilderCAI::NextPatrolPoint(size_t first) const
+{
+	for (size_t i = first; i < commandQue.size(); ++i) {
+		const Command& c = commandQue[i];
+
+		if (c.GetID() == CMD_PATROL)
+			return &c;
+		if (c.GetID() != CMD_FIGHT || !c.IsInternalOrder())
+			return nullptr;
+	}
+
+	return nullptr;
+}
+
+
+// An automatic job a fight or patrol search started (tempOrder, 5 params) is
+// dropped as soon as that search would pass over its target (see
+// SkipThreatenedTarget), so the job and the search never disagree: a job on a
+// target out of fire goes on even with the builder under fire, it leads away.
+bool CBuilderCAI::AbandonThreatenedJob(const Command& c)
+{
+	RECOIL_DETAILED_TRACY_ZONE;
+	if (owner->immobile || !tempOrder || !c.IsInternalOrder() || c.GetNumParams() != 5)
+		return false;
+	if (c.GetID() != CMD_REPAIR && c.GetID() != CMD_RECLAIM && c.GetID() != CMD_RESURRECT)
+		return false;
+
+	const int maxUnits = static_cast<int>(unitHandler.MaxUnits());
+	const int targetID = static_cast<int>(c.GetParam(0));
+	const bool isFeature = (targetID >= maxUnits);
+	const CWorldObject* target = isFeature?
+		static_cast<const CWorldObject*>(featureHandler.GetFeature(targetID - maxUnits)):
+		static_cast<const CWorldObject*>(unitHandler.GetUnit(targetID));
+
+	// a target that is gone is the job's own business
+	if (target == nullptr)
+		return false;
+
+	Threats threats;
+	threats.patrol = (NextPatrolPoint(1) != nullptr);
+	CollectThreats(owner->pos, owner->pos.distance2D(target->pos), threats);
+
+	if (!SkipThreatenedTarget(target, targetID, &threats))
+		return false;
+
+	const Threats::Threat* t = &threats.firstSkippedBy;
+	const char* why = IsInBuildRange(target)? "the builder and its target are under fire": "its target is under fire, out of build range";
+
+	LOG_SL(LOG_SECTION_BUILDER_SAFETY, L_NOTICE,
+		"builder %d (%s) at (%.0f, %.0f) on %s drops its automatic %s of %s %d at (%.0f, %.0f): %s (enemy %d at (%.0f, %.0f), range %.0f)",
+		owner->id, owner->unitDef->name.c_str(), owner->pos.x, owner->pos.z, threats.patrol? "patrol": "fight",
+		(c.GetID() == CMD_REPAIR)? "repair": ((c.GetID() == CMD_RECLAIM)? "reclaim": "resurrect"),
+		isFeature? "feature": "unit", isFeature? targetID - maxUnits: targetID, target->pos.x, target->pos.z,
+		why, t->unitID, t->pos.x, t->pos.z, t->range);
+
+	ownerBuilder->StopBuild();
+	CBuilderCaches::RemoveUnitFromReclaimers(owner);
+	CBuilderCaches::RemoveUnitFromFeatureReclaimers(owner);
+	CBuilderCaches::RemoveUnitFromResurrecters(owner);
+	StopMoveAndFinishCommand();
+	return true;
+}
+
+
+// A builder under fire on a patrol leg that leads toward the enemy turns back:
+// the leg ends, and the next patrol point takes it away. When that point lies
+// toward the enemy as well, turning would only flip between the two legs, so
+// the leg goes on.
+bool CBuilderCAI::EndThreatenedPatrolLeg(const Command& c, const Threats& threats)
+{
+	RECOIL_DETAILED_TRACY_ZONE;
+	if (!threats.patrol || !threats.builderThreatened)
+		return false;
+
+	const Threats::Threat* t = threats.Covering(owner->pos);
+	const Command* nextPatrol = NextPatrolPoint(0);
+	const float3 legEnd = (c.GetNumParams() >= 6)? c.GetPos(3): c.GetPos(0);
+	const float3 nextEnd = nextPatrol->GetPos(0);
+	const float here = owner->pos.SqDistance2D(t->pos);
+
+	if (legEnd.SqDistance2D(t->pos) >= here)
+		return false;
+
+	if (nextEnd.SqDistance2D(t->pos) < here) {
+		if (ThreatLogDue(-2 - t->unitID)) {
+			LOG_SL(LOG_SECTION_BUILDER_SAFETY, L_NOTICE,
+				"builder %d (%s) at (%.0f, %.0f) is under fire on patrol (enemy %d at (%.0f, %.0f), range %.0f), but both patrol points (%.0f, %.0f) and (%.0f, %.0f) lie toward it: keeps its leg",
+				owner->id, owner->unitDef->name.c_str(), owner->pos.x, owner->pos.z, t->unitID, t->pos.x, t->pos.z, t->range,
+				legEnd.x, legEnd.z, nextEnd.x, nextEnd.z);
+		}
+		return false;
+	}
+
+	LOG_SL(LOG_SECTION_BUILDER_SAFETY, L_NOTICE,
+		"builder %d (%s) at (%.0f, %.0f) is under fire on patrol (enemy %d at (%.0f, %.0f), range %.0f): turns back from (%.0f, %.0f) toward (%.0f, %.0f)",
+		owner->id, owner->unitDef->name.c_str(), owner->pos.x, owner->pos.z, t->unitID, t->pos.x, t->pos.z, t->range,
+		legEnd.x, legEnd.z, nextEnd.x, nextEnd.z);
+
+	StopMoveAndFinishCommand();
+	return true;
+}
+
+
+void CBuilderCAI::LogThreatSkips(const Threats& threats)
+{
+	if (threats.skipped == 0)
+		return;
+	if (!ThreatLogDue(threats.firstSkippedID * 64 + std::min(threats.skipped, 63)))
+		return;
+
+	const int maxUnits = static_cast<int>(unitHandler.MaxUnits());
+	const bool isFeature = (threats.firstSkippedID >= maxUnits);
+	const Threats::Threat& t = threats.firstSkippedBy;
+
+	LOG_SL(LOG_SECTION_BUILDER_SAFETY, L_NOTICE,
+		"builder %d (%s) at (%.0f, %.0f) on %s passes over %d target(s) under fire, first %s %d (enemy %d at (%.0f, %.0f), range %.0f)",
+		owner->id, owner->unitDef->name.c_str(), owner->pos.x, owner->pos.z, threats.patrol? "patrol": "fight", threats.skipped,
+		isFeature? "feature": "unit", isFeature? threats.firstSkippedID - maxUnits: threats.firstSkippedID,
+		t.unitID, t.pos.x, t.pos.z, t.range);
+}
+
+
+bool CBuilderCAI::ThreatLogDue(int key)
+{
+	if (key == lastThreatLogKey)
+		return false;
+
+	lastThreatLogKey = key;
+	return true;
+}
 
 
 void CBuilderCAI::BuggerOff(const float3& pos, float radius) {

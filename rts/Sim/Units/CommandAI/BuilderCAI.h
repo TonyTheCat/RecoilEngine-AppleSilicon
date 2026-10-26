@@ -69,6 +69,29 @@ private:
 	};
 	typedef Bitwise::BitwiseEnum<ReclaimOptions> ReclaimOption;
 
+	/**
+	 * Known enemies that could shoot a point (gameplay branch, builder
+	 * self-preservation): builders on a fight never walk into enemy fire for
+	 * an automatic job, and on patrol they also leave it.
+	 */
+	struct Threats {
+		struct Threat {
+			float3 pos;
+			float range;
+			int unitID;
+		};
+		std::vector<Threat> list;
+		bool patrol = false;
+		bool builderThreatened = false;
+
+		// what the searches skipped, for the log
+		int skipped = 0;
+		int firstSkippedID = -1;
+		Threat firstSkippedBy = {};
+
+		const Threat* Covering(const float3& pos) const;
+	};
+
 private:
 	/**
 	 * @param pos position where to reclaim
@@ -76,16 +99,16 @@ private:
 	 * @param cmdopts command options
 	 * @param recoptions reclaim optioons
 	 */
-	bool FindReclaimTargetAndReclaim(const float3& pos, float radius, unsigned char cmdopt, ReclaimOption recoptions);
+	bool FindReclaimTargetAndReclaim(const float3& pos, float radius, unsigned char cmdopt, ReclaimOption recoptions, Threats* threats = nullptr);
 	/**
 	 * @param freshOnly reclaims only corpses that have rez progress or all the metal left
 	 */
-	bool FindResurrectableFeatureAndResurrect(const float3& pos, float radius, unsigned char options, bool freshOnly);
+	bool FindResurrectableFeatureAndResurrect(const float3& pos, float radius, unsigned char options, bool freshOnly, Threats* threats = nullptr);
 
 	/**
 	 * @param builtOnly skips units that are under construction
 	 */
-	bool FindRepairTargetAndRepair(const float3& pos, float radius, unsigned char options, bool attackEnemy, bool builtOnly);
+	bool FindRepairTargetAndRepair(const float3& pos, float radius, unsigned char options, bool attackEnemy, bool builtOnly, Threats* threats = nullptr);
 	/**
 	 * @param pos         position where to search for units to capture
 	 * @param radius      radius in which are searched units to capture
@@ -94,7 +117,21 @@ private:
 	 */
 	bool FindCaptureTargetAndCapture(const float3& pos, float radius, unsigned char options, bool healthyOnly);
 
-	int FindReclaimTarget(const float3& pos, float radius, unsigned char cmdopt, ReclaimOption recoptions, float bestStartDist = 1.0e30f) const;
+	int FindReclaimTarget(const float3& pos, float radius, unsigned char cmdopt, ReclaimOption recoptions, float bestStartDist = 1.0e30f, Threats* threats = nullptr) const;
+
+	/// fills threats with the known enemies that could shoot inside the circle, and whether the builder stands under fire
+	void CollectThreats(const float3& center, float radius, Threats& threats) const;
+	/// true (and counted in threats) when a search has to pass over target: under fire and not workable from where the builder stands
+	bool SkipThreatenedTarget(const CWorldObject* target, int targetID, Threats* threats) const;
+	/// the PATROL a run of internal FIGHTs from queue index first belongs to, nullptr when they are not a patrol leg
+	const Command* NextPatrolPoint(size_t first) const;
+	/// drops an automatic fight/patrol job that came under fire
+	bool AbandonThreatenedJob(const Command& c);
+	/// ends a patrol leg that leads a builder under fire toward the enemy
+	bool EndThreatenedPatrolLeg(const Command& c, const Threats& threats);
+	void LogThreatSkips(const Threats& threats);
+	/// logs line once per builder until the key changes, so a skip seen every SlowUpdate shows up once
+	bool ThreatLogDue(int key);
 
 	bool MoveInBuildRange(const CWorldObject* obj, const bool checkMoveTypeForFailed = false);
 	bool MoveInBuildRange(const float3& pos, float radius, const bool checkMoveTypeForFailed = false);
@@ -142,6 +179,8 @@ private:
 	int lastPC3;
 
 	bool range3D;
+
+	int lastThreatLogKey; ///< log state only, see ThreatLogDue
 };
 
 #endif // _BUILDER_CAI_H_
