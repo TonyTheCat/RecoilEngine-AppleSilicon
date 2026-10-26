@@ -49,18 +49,34 @@ CMouseCursor::CMouseCursor(const std::string& name_, HotSpot hs)
 CMouseCursor::~CMouseCursor()
 {
 	RECOIL_DETAILED_TRACY_ZONE;
+	Release();
+}
+
+void CMouseCursor::Release()
+{
 	if (hwCursor != nullptr) {
 		hwCursor->Kill();
 		IHardwareCursor::Free(hwCursor);
+		hwCursor = nullptr;
 	}
 
 	for (const auto& image: images) {
 		glDeleteTextures(1, &image.texture);
 	}
+
+	images.clear();
 }
 
 
 CMouseCursor& CMouseCursor::operator = (CMouseCursor&& mc) noexcept {
+	if (this == &mc)
+		return *this;
+
+	// the cursor being overwritten lets go of its own textures first:
+	// CMouseHandler::ReplaceMouseCursor kills the old cursor by assigning
+	// an empty one to it, which used to leak every texture it had
+	Release();
+
 	name = std::move(mc.name);
 	images = std::move(mc.images);
 	frames = std::move(mc.frames);
