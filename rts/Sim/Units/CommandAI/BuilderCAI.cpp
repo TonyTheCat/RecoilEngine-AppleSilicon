@@ -49,6 +49,18 @@ static constexpr float THREAT_MARGIN = 100.0f;
 static constexpr float THREAT_RANGE_CAP = 700.0f;
 static constexpr float THREAT_DEFAULT_RANGE = 500.0f;
 
+// ThreatLogDue keys, in disjoint ranges (-1 = nothing logged yet): a stretch
+// of searches that pass over targets logs once, a kept patrol leg once per
+// enemy, a patrol turn once per destination (a leg can be two internal FIGHTs)
+static constexpr int THREAT_LOG_SKIPPING = -2;
+
+static int ThreatLogKeepLegKey(int enemyID) {
+	return -3 - enemyID;
+}
+static int ThreatLogTurnKey(const float3& dest) {
+	return -100000 - (int(dest.x) / 8) * 4096 - int(dest.z) / 8;
+}
+
 
 CR_BIND_DERIVED(CBuilderCAI ,CMobileCAI , )
 
@@ -1969,7 +1981,7 @@ bool CBuilderCAI::EndThreatenedPatrolLeg(const Command& c, const Threats& threat
 		return false;
 
 	if (nextEnd.SqDistance2D(t->pos) < here) {
-		if (ThreatLogDue(-2 - t->unitID)) {
+		if (ThreatLogDue(ThreatLogKeepLegKey(t->unitID))) {
 			LOG_SL(LOG_SECTION_BUILDER_SAFETY, L_NOTICE,
 				"builder %d (%s) at (%.0f, %.0f) is under fire on patrol (enemy %d at (%.0f, %.0f), range %.0f), but both patrol points (%.0f, %.0f) and (%.0f, %.0f) lie toward it: keeps its leg",
 				owner->id, owner->unitDef->name.c_str(), owner->pos.x, owner->pos.z, t->unitID, t->pos.x, t->pos.z, t->range,
@@ -1978,21 +1990,29 @@ bool CBuilderCAI::EndThreatenedPatrolLeg(const Command& c, const Threats& threat
 		return false;
 	}
 
-	LOG_SL(LOG_SECTION_BUILDER_SAFETY, L_NOTICE,
-		"builder %d (%s) at (%.0f, %.0f) is under fire on patrol (enemy %d at (%.0f, %.0f), range %.0f): turns back from (%.0f, %.0f) toward (%.0f, %.0f)",
-		owner->id, owner->unitDef->name.c_str(), owner->pos.x, owner->pos.z, t->unitID, t->pos.x, t->pos.z, t->range,
-		legEnd.x, legEnd.z, nextEnd.x, nextEnd.z);
+	if (ThreatLogDue(ThreatLogTurnKey(nextEnd))) {
+		LOG_SL(LOG_SECTION_BUILDER_SAFETY, L_NOTICE,
+			"builder %d (%s) at (%.0f, %.0f) is under fire on patrol (enemy %d at (%.0f, %.0f), range %.0f): turns back from (%.0f, %.0f) toward (%.0f, %.0f)",
+			owner->id, owner->unitDef->name.c_str(), owner->pos.x, owner->pos.z, t->unitID, t->pos.x, t->pos.z, t->range,
+			legEnd.x, legEnd.z, nextEnd.x, nextEnd.z);
+	}
 
 	StopMoveAndFinishCommand();
 	return true;
 }
 
 
+// once per stretch of searches that pass over something: a builder walking
+// past wrecks under fire would otherwise log at every step
 void CBuilderCAI::LogThreatSkips(const Threats& threats)
 {
-	if (threats.skipped == 0)
+	if (threats.skipped == 0) {
+		if (lastThreatLogKey == THREAT_LOG_SKIPPING)
+			lastThreatLogKey = -1;
+
 		return;
-	if (!ThreatLogDue(threats.firstSkippedID * 64 + std::min(threats.skipped, 63)))
+	}
+	if (!ThreatLogDue(THREAT_LOG_SKIPPING))
 		return;
 
 	const int maxUnits = static_cast<int>(unitHandler.MaxUnits());
