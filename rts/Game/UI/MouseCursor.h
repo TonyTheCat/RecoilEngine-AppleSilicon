@@ -45,6 +45,8 @@ public:
 private:
 	struct ImageData;
 
+	/// deletes this cursor's textures and hardware cursor
+	void Release();
 	bool LoadDummyImage();
 	bool LoadCursorImage(const std::string& name, ImageData& image);
 	bool Build(const std::string& name);
