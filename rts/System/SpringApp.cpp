@@ -777,6 +777,48 @@ void SpringApp::Startup()
 
 
 
+// GL objects still alive in the context, by type. The window and its context
+// survive a reload, so whatever a game left behind shows up as growth from one
+// reload to the next. Names are probed until a long run of free ones (~5 ms).
+static void LogLiveGLObjects(const char* when)
+{
+#ifndef HEADLESS
+	const spring_time t0 = spring_gettime();
+
+	const auto count = [](auto isName) {
+		GLuint live = 0;
+		GLuint maxName = 0;
+		GLuint misses = 0;
+
+		for (GLuint name = 1; misses < 65536 && name < (1u << 22); ++name) {
+			if (isName(name)) {
+				++live;
+				maxName = name;
+				misses = 0;
+			} else {
+				++misses;
+			}
+		}
+
+		return std::make_pair(live, maxName);
+	};
+
+	const auto tex = count([](GLuint n) { return glIsTexture(n) == GL_TRUE; });
+	const auto buf = count([](GLuint n) { return glIsBuffer(n) == GL_TRUE; });
+	const auto vao = count([](GLuint n) { return glIsVertexArray(n) == GL_TRUE; });
+	const auto fbo = count([](GLuint n) { return glIsFramebuffer(n) == GL_TRUE; });
+	const auto rbo = count([](GLuint n) { return glIsRenderbuffer(n) == GL_TRUE; });
+	const auto prg = count([](GLuint n) { return glIsProgram(n) == GL_TRUE; });
+	const auto shd = count([](GLuint n) { return glIsShader(n) == GL_TRUE; });
+	const auto qry = count([](GLuint n) { return glIsQuery(n) == GL_TRUE; });
+
+	LOG("[SpringApp::Reload] GL objects alive %s: textures %u (max name %u), buffers %u (%u), vertex arrays %u (%u), framebuffers %u (%u), renderbuffers %u (%u), programs %u (%u), shaders %u (%u), queries %u (%u); counted in %.0f ms",
+		when, tex.first, tex.second, buf.first, buf.second, vao.first, vao.second, fbo.first, fbo.second,
+		rbo.first, rbo.second, prg.first, prg.second, shd.first, shd.second, qry.first, qry.second,
+		(spring_gettime() - t0).toMilliSecsf());
+#endif
+}
+
 void SpringApp::Reload(const std::string script)
 {
 	LOG("[SpringApp::%s][1]", __func__);
@@ -852,6 +894,7 @@ void SpringApp::Reload(const std::string script)
 	*/
 
 	LOG("[SpringApp::%s][8]", __func__);
+	LogLiveGLObjects("after the game and its Lua GL objects are freed");
 
 	// reload sounds.lua in case we switched to a different game
 	ISound::Initialize(true);
