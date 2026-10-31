@@ -33,6 +33,12 @@
 
 #define AUTO_GENERATE_ATTACK_ORDERS 1
 
+#define LOG_SECTION_THREAT_TARGET "ThreatTarget"
+LOG_REGISTER_SECTION_GLOBAL(LOG_SECTION_THREAT_TARGET)
+
+// how often an automatic attack on an unarmed unit looks for an armed enemy
+static constexpr int THREAT_RECHECK_FRAMES = 15;
+
 // MobileCAI is not always assigned to aircraft
 static AAirMoveType* GetAirMoveType(const CUnit* owner) {
 	assert(owner->unitDef->IsAirUnit());
@@ -898,6 +904,25 @@ void CMobileCAI::ExecuteAttack(Command& c)
 		if (owner->moveState < MOVESTATE_ROAM && curTargetDist > maxTargetDist) {
 			StopMoveAndFinishCommand();
 			return;
+		}
+	}
+
+	// an automatic attack (from a fight, patrol or idle search) on a unit with no
+	// weapons gives way to an armed enemy in range (gameplay branch, see GAMEPLAY.md)
+	if (inCommand == CMD_ATTACK && tempOrder && orderTarget != nullptr && orderTarget->weapons.empty() &&
+		c.IsInternalOrder() && c.GetNumParams() == 1 && ((gs->frameNum + owner->id) % THREAT_RECHECK_FRAMES) == 0)
+	{
+		const CUnit* threat = CGameHelper::GetClosestValidTarget(owner->pos, owner->maxRange, owner->allyteam, this);
+
+		if (threat != nullptr && threat != orderTarget && !threat->weapons.empty()) {
+			LOG_SL(LOG_SECTION_THREAT_TARGET, L_NOTICE,
+				"unit %d (%s) at (%.0f, %.0f) leaves unarmed %s %d for armed %s %d at (%.0f, %.0f)",
+				owner->id, owner->unitDef->name.c_str(), owner->pos.x, owner->pos.z,
+				orderTarget->unitDef->name.c_str(), orderTarget->id,
+				threat->unitDef->name.c_str(), threat->id, threat->pos.x, threat->pos.z);
+
+			c.SetParam(0, threat->id);
+			inCommand = CMD_STOP;
 		}
 	}
 

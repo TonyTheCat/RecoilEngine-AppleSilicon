@@ -2,6 +2,8 @@
 
 #include "GameHelper.h"
 
+#include <limits>
+
 #include "Camera.h"
 #include "GameSetup.h"
 #include "Game/GlobalUnsynced.h"
@@ -546,6 +548,47 @@ namespace {
 		};
 
 		/**
+		 * Return the most threatening unit near the owner (gameplay branch, see
+		 * GAMEPLAY.md): the closest one, but a unit with no weapons counts as
+		 * UNARMED_DIST_MUL times as far away and the unit that attacked the owner
+		 * within the last ATTACKER_FRAMES counts as half as far, so a unit sent
+		 * into a fight shoots what shoots back before it works on harmless
+		 * extractors and walls.
+		 */
+		struct ClosestThreat : public ClosestUnit
+		{
+			static constexpr float UNARMED_DIST_MUL = 3.0f;
+			static constexpr float ATTACKER_DIST_MUL = 0.5f;
+			static constexpr int ATTACKER_FRAMES = 200;
+
+			const CUnit* const attacker;
+			float bestScore;
+
+			ClosestThreat(const float3& pos, float searchRadius, const CUnit* owner) :
+				ClosestUnit(pos, searchRadius),
+				attacker((owner->lastAttackFrame + ATTACKER_FRAMES > gs->frameNum) ? owner->lastAttacker : nullptr),
+				bestScore(std::numeric_limits<float>::max()) {}
+
+			void AddUnit(CUnit* u) {
+				const float sqDist = (pos - u->midPos).SqLength2D();
+				if (sqDist > sqRadius)
+					return;
+
+				float mul = 1.0f;
+				if (u->weapons.empty())
+					mul *= UNARMED_DIST_MUL;
+				if (u == attacker)
+					mul *= ATTACKER_DIST_MUL;
+
+				const float score = sqDist * mul * mul;
+				if (score <= bestScore) {
+					bestScore = score;
+					closeUnit = u;
+				}
+			}
+		};
+
+		/**
 		 * Return the closest unit, using GetUnitErrorPos
 		 * instead of the unit's actual position.
 		 *
@@ -806,7 +849,7 @@ CUnit* CGameHelper::GetClosestEnemyUnit(const CUnit* excludeUnit, const float3& 
 CUnit* CGameHelper::GetClosestValidTarget(const float3& pos, float searchRadius, int searchAllyteam, const CMobileCAI* cai)
 {
 	RECOIL_DETAILED_TRACY_ZONE;
-	Query::ClosestUnit q(pos, searchRadius);
+	Query::ClosestThreat q(pos, searchRadius, cai->owner);
 	QueryUnits(Filter::Enemy_InLos_ValidTarget(searchAllyteam, cai), q);
 	return q.GetClosestUnit();
 }
