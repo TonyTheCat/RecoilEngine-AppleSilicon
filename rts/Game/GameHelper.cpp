@@ -854,6 +854,26 @@ CUnit* CGameHelper::GetClosestValidTarget(const float3& pos, float searchRadius,
 	return q.GetClosestUnit();
 }
 
+const CUnit* CGameHelper::GetArmedEnemyNear(const CUnit* unit, float radius)
+{
+	RECOIL_DETAILED_TRACY_ZONE;
+	QuadFieldQuery qfQuery;
+	quadField.GetUnitsExact(qfQuery, unit->pos, radius);
+
+	for (const CUnit* other: *qfQuery.units) {
+		if (other->weapons.empty() || other->IsNeutral() || other->IsCrashing())
+			continue;
+		if (teamHandler.Ally(unit->allyteam, other->allyteam))
+			continue;
+		if (!(other->losStatus[unit->allyteam] & (LOS_INLOS | LOS_INRADAR)))
+			continue;
+
+		return other;
+	}
+
+	return nullptr;
+}
+
 CUnit* CGameHelper::GetClosestEnemyUnitNoLosTest(
 	const CUnit* excludeUnit,
 	const float3& searchPos,

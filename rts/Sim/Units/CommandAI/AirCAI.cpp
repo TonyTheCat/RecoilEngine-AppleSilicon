@@ -21,10 +21,14 @@
 #include "System/StringUtil.h"
 
 #include <cassert>
+#include <unordered_map>
 
 #include "System/Misc/TracyDefs.h"
 
 #define AUTO_GENERATE_ATTACK_ORDERS 1
+
+#define LOG_SECTION_AIR_SAFETY "AirSafety"
+LOG_REGISTER_SECTION_GLOBAL(LOG_SECTION_AIR_SAFETY)
 
 // AirCAI is always assigned to StrafeAirMoveType aircraft
 static CStrafeAirMoveType* GetStrafeAirMoveType(const CUnit* owner) {
@@ -376,9 +380,37 @@ void CAirCAI::ExecuteFight(Command& c)
 				return;
 			}
 		}
+
+		LogPatrolIdle(c);
 	}
 
 	ExecuteMove(c);
+}
+
+void CAirCAI::LogPatrolIdle(const Command& c)
+{
+	RECOIL_DETAILED_TRACY_ZONE;
+	// one line per aircraft per 5 seconds, and only with an enemy near
+	static std::unordered_map<int, int> lastLogged;
+	int& last = lastLogged[owner->id];
+	if (gs->frameNum - last < 150 && last <= gs->frameNum)
+		return;
+
+	const CUnit* enemy = CGameHelper::GetClosestEnemyUnitNoLosTest(owner, owner->pos, 1500.0f, owner->allyteam, true, false);
+	if (enemy == nullptr)
+		return;
+
+	last = gs->frameNum;
+
+	const WeaponDef* wd = owner->weapons.empty()? nullptr: owner->weapons[0]->weaponDef;
+	LOG_SL(LOG_SECTION_AIR_SAFETY, L_NOTICE,
+		"aircraft %d (%s) at (%.0f, %.0f) on %s finds nothing to attack, nearest enemy %d (%s) %.0f away: fire state %d, move state %d, fighter %d, los %d, radar %d, valid target %d, weapon %s, line distance %.0f (limit 1000 in maneuver)",
+		owner->id, owner->unitDef->name.c_str(), owner->pos.x, owner->pos.z, (c.GetID() == CMD_PATROL)? "patrol": "fight",
+		enemy->id, enemy->unitDef->name.c_str(), owner->pos.distance2D(enemy->pos),
+		int(owner->fireState), int(owner->moveState), int(owner->unitDef->IsFighterAirUnit()),
+		int((enemy->losStatus[owner->allyteam] & LOS_INLOS) != 0), int((enemy->losStatus[owner->allyteam] & LOS_INRADAR) != 0),
+		int(IsValidTarget(enemy, nullptr)), (wd != nullptr)? wd->name.c_str(): "none",
+		LinePointDist(commandPos1, commandPos2, enemy->pos));
 }
 
 void CAirCAI::ExecuteAttack(Command& c)

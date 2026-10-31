@@ -130,6 +130,8 @@ public:
 
 	static CUnit* GetClosestUnit(const float3& pos, float searchRadius);
 	static CUnit* GetClosestEnemyUnit(const CUnit* excludeUnit, const float3& pos, float searchRadius, int searchAllyteam);
+	// an enemy with weapons that the unit's allyteam sees (los or radar) within radius of it
+	static const CUnit* GetArmedEnemyNear(const CUnit* unit, float radius);
 	static CUnit* GetClosestValidTarget(const float3& pos, float radius, int searchAllyteam, const CMobileCAI* cai);
 	static CUnit* GetClosestEnemyUnitNoLosTest(
 		const CUnit* excludeUnit,
