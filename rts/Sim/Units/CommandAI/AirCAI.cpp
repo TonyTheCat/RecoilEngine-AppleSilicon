@@ -189,8 +189,14 @@ void CAirCAI::SlowUpdate()
 	#if (AUTO_GENERATE_ATTACK_ORDERS == 1)
 	if (commandQue.empty()) {
 		// queue remains empty if no target, can bail early
-		if (!AirAutoGenerateTarget(GetStrafeAirMoveType(owner)))
+		if (!AirAutoGenerateTarget(GetStrafeAirMoveType(owner))) {
+			// an idle plane kept up by an armed enemy near lands once he is gone
+			// (StopMoving decides, gameplay branch)
+			AAirMoveType* idlePlane = GetStrafeAirMoveType(owner);
+			if (idlePlane->aircraftState == AAirMoveType::AIRCRAFT_FLYING && idlePlane->autoLand && !owner->unitDef->DontLand())
+				StopMove();
 			return;
+		}
 	}
 	#endif
 
