@@ -910,7 +910,7 @@ void CMobileCAI::ExecuteAttack(Command& c)
 	// an automatic attack (from a fight, patrol or idle search) on a unit with no
 	// weapons gives way to an armed enemy in range (gameplay branch, see GAMEPLAY.md)
 	if (inCommand == CMD_ATTACK && tempOrder && orderTarget != nullptr && orderTarget->weapons.empty() &&
-		c.IsInternalOrder() && c.GetNumParams() == 1 && ((gs->frameNum + owner->id) % THREAT_RECHECK_FRAMES) == 0)
+		c.GetNumParams() == 1 && ((gs->frameNum + owner->id) % THREAT_RECHECK_FRAMES) == 0)
 	{
 		const CUnit* threat = CGameHelper::GetClosestValidTarget(owner->pos, owner->maxRange, owner->allyteam, this);
 
