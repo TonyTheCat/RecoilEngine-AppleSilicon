@@ -2021,7 +2021,11 @@ bool CBuilderCAI::EndThreatenedPatrolLeg(const Command& c, const Threats& threat
 		commandQue.clear();
 		inCommand = CMD_STOP;
 		tempOrder = false;
-		commandQue.push_front(Command(CMD_MOVE, 0, safe));
+		// out of the enemy's reach already: stop here, never walk closer to it
+		if (owner->pos.SqDistance2D(t->pos) < safe.SqDistance2D(t->pos))
+			commandQue.push_front(Command(CMD_MOVE, 0, safe));
+		else
+			StopMove();
 		return true;
 	}
 
