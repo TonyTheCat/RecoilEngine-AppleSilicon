@@ -48,15 +48,15 @@ LOG_REGISTER_SECTION_GLOBAL(LOG_SECTION_BUILDER_SAFETY)
 static constexpr float THREAT_MARGIN = 100.0f;
 static constexpr float THREAT_RANGE_CAP = 700.0f;
 static constexpr float THREAT_DEFAULT_RANGE = 500.0f;
+// a target under fire just out of build range is still worked: the builder only steps this far
+static constexpr float THREAT_STEP = 100.0f;
+// a patrolling builder looks this far along its leg for enemy fire
+static constexpr float THREAT_LOOKAHEAD = 300.0f;
 
 // ThreatLogDue keys, in disjoint ranges (-1 = nothing logged yet): a stretch
-// of searches that pass over targets logs once, a kept patrol leg once per
-// enemy, a patrol turn once per destination (a leg can be two internal FIGHTs)
+// of searches that pass over targets logs once, a patrol turn once per destination (a leg can be two internal FIGHTs)
 static constexpr int THREAT_LOG_SKIPPING = -2;
 
-static int ThreatLogKeepLegKey(int enemyID) {
-	return -3 - enemyID;
-}
 static int ThreatLogTurnKey(const float3& dest) {
 	return -100000 - (int(dest.x) / 8) * 4096 - int(dest.z) / 8;
 }
@@ -1316,7 +1316,7 @@ void CBuilderCAI::ExecuteFight(Command& c)
 	Threats* searchThreats = nullptr;
 	if (!owner->immobile) {
 		threats.patrol = (c.IsInternalOrder() && NextPatrolPoint(0) != nullptr);
-		CollectThreats(curPosOnLine, searchRadius + owner->pos.distance2D(curPosOnLine), threats);
+		CollectThreats(curPosOnLine, searchRadius + owner->pos.distance2D(curPosOnLine) + THREAT_LOOKAHEAD, threats);
 		searchThreats = &threats;
 
 		if (EndThreatenedPatrolLeg(c, threats))
@@ -1872,7 +1872,8 @@ void CBuilderCAI::CollectThreats(const float3& center, float radius, Threats& th
 }
 
 
-// A target under fire is only worked from where the builder already stands,
+// A target under fire is only worked from where the builder already stands
+// (or a short step from it, THREAT_STEP),
 // and on patrol only while the builder itself is out of fire.
 bool CBuilderCAI::SkipThreatenedTarget(const CWorldObject* target, int targetID, Threats* threats) const
 {
@@ -1883,7 +1884,7 @@ bool CBuilderCAI::SkipThreatenedTarget(const CWorldObject* target, int targetID,
 
 	if (t == nullptr)
 		return false;
-	if (IsInBuildRange(target) && !(threats->patrol && threats->builderThreatened))
+	if (IsInBuildRange(target->pos, target->buildeeRadius + THREAT_STEP) && !(threats->patrol && threats->builderThreatened))
 		return false;
 
 	if (threats->skipped++ == 0) {
@@ -1961,40 +1962,74 @@ bool CBuilderCAI::AbandonThreatenedJob(const Command& c)
 }
 
 
-// A builder under fire on a patrol leg that leads toward the enemy turns back:
-// the leg ends, and the next patrol point takes it away. When that point lies
-// toward the enemy as well, turning would only flip between the two legs, so
-// the leg goes on.
+// A builder on a patrol leg that leads into enemy fire, or is already under it
+// and walks toward the enemy, turns back: the leg ends, and the next patrol
+// point takes it away. When that point lies toward the enemy as well, the patrol
+// can only end in the enemy's range, so it is dropped and the builder walks out
+// of range.
 bool CBuilderCAI::EndThreatenedPatrolLeg(const Command& c, const Threats& threats)
 {
 	RECOIL_DETAILED_TRACY_ZONE;
-	if (!threats.patrol || !threats.builderThreatened)
+	if (!threats.patrol)
 		return false;
 
-	const Threats::Threat* t = threats.Covering(owner->pos);
 	const Command* nextPatrol = NextPatrolPoint(0);
 	const float3 legEnd = (c.GetNumParams() >= 6)? c.GetPos(3): c.GetPos(0);
 	const float3 nextEnd = nextPatrol->GetPos(0);
+
+	// the fire the builder stands in, else the fire a step ahead along the leg
+	const Threats::Threat* t = threats.Covering(owner->pos);
+	bool ahead = false;
+
+	if (t == nullptr) {
+		float3 dir = legEnd - owner->pos;
+		dir.y = 0.0f;
+		const float dist = dir.Length2D();
+
+		if (dist <= 1.0f)
+			return false;
+
+		t = threats.Covering(owner->pos + dir * (std::min(THREAT_LOOKAHEAD, dist) / dist));
+		ahead = true;
+
+		if (t == nullptr)
+			return false;
+	}
+
 	const float here = owner->pos.SqDistance2D(t->pos);
 
 	if (legEnd.SqDistance2D(t->pos) >= here)
 		return false;
 
 	if (nextEnd.SqDistance2D(t->pos) < here) {
-		if (ThreatLogDue(ThreatLogKeepLegKey(t->unitID))) {
-			LOG_SL(LOG_SECTION_BUILDER_SAFETY, L_NOTICE,
-				"builder %d (%s) at (%.0f, %.0f) is under fire on patrol (enemy %d at (%.0f, %.0f), range %.0f), but both patrol points (%.0f, %.0f) and (%.0f, %.0f) lie toward it: keeps its leg",
-				owner->id, owner->unitDef->name.c_str(), owner->pos.x, owner->pos.z, t->unitID, t->pos.x, t->pos.z, t->range,
-				legEnd.x, legEnd.z, nextEnd.x, nextEnd.z);
-		}
-		return false;
+		// both ends lie toward the enemy: leave the patrol and walk out of its range
+		float3 away = owner->pos - t->pos;
+		away.y = 0.0f;
+		away = (away.SqLength2D() > 1.0f)? away.Normalize(): float3(1.0f, 0.0f, 0.0f);
+
+		float3 safe = t->pos + away * (t->range + THREAT_MARGIN + 150.0f);
+		safe.ClampInBounds();
+		safe.y = CGround::GetHeightAboveWater(safe.x, safe.z);
+
+		LOG_SL(LOG_SECTION_BUILDER_SAFETY, L_NOTICE,
+			"builder %d (%s) at (%.0f, %.0f) %s on patrol (enemy %d at (%.0f, %.0f), range %.0f) and both patrol points (%.0f, %.0f) and (%.0f, %.0f) lie toward it: drops the patrol, walks out to (%.0f, %.0f)",
+			owner->id, owner->unitDef->name.c_str(), owner->pos.x, owner->pos.z, ahead? "would walk into fire": "is under fire",
+			t->unitID, t->pos.x, t->pos.z, t->range, legEnd.x, legEnd.z, nextEnd.x, nextEnd.z, safe.x, safe.z);
+
+		ClearCommandDependencies();
+		SetOrderTarget(nullptr);
+		commandQue.clear();
+		inCommand = CMD_STOP;
+		tempOrder = false;
+		commandQue.push_front(Command(CMD_MOVE, 0, safe));
+		return true;
 	}
 
 	if (ThreatLogDue(ThreatLogTurnKey(nextEnd))) {
 		LOG_SL(LOG_SECTION_BUILDER_SAFETY, L_NOTICE,
-			"builder %d (%s) at (%.0f, %.0f) is under fire on patrol (enemy %d at (%.0f, %.0f), range %.0f): turns back from (%.0f, %.0f) toward (%.0f, %.0f)",
-			owner->id, owner->unitDef->name.c_str(), owner->pos.x, owner->pos.z, t->unitID, t->pos.x, t->pos.z, t->range,
-			legEnd.x, legEnd.z, nextEnd.x, nextEnd.z);
+			"builder %d (%s) at (%.0f, %.0f) %s on patrol (enemy %d at (%.0f, %.0f), range %.0f): turns back from (%.0f, %.0f) toward (%.0f, %.0f)",
+			owner->id, owner->unitDef->name.c_str(), owner->pos.x, owner->pos.z, ahead? "would walk into fire": "is under fire",
+			t->unitID, t->pos.x, t->pos.z, t->range, legEnd.x, legEnd.z, nextEnd.x, nextEnd.z);
 	}
 
 	StopMoveAndFinishCommand();
