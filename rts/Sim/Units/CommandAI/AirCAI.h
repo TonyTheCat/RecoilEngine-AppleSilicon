@@ -30,6 +30,8 @@ public:
 	void ExecuteAreaAttack(Command& c);
 	void ExecuteAttack(Command& c) override;
 	void ExecuteFight(Command& c) override;
+	// gameplay branch: why a patrolling aircraft with an enemy near found nothing to attack (AirSafety log)
+	void LogPatrolIdle(const Command& c);
 	void ExecuteMove(Command& c) override;
 
 	bool IsValidTarget(const CUnit* enemy, CWeapon* weapon) const override;

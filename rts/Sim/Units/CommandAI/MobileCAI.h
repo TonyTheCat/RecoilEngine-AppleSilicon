@@ -105,6 +105,13 @@ protected:
 	int lastIdleCheck = 0;
 	int buggerOffAttempts = 0;
 
+	/// gameplay branch: automatic movement stops at the edge of a turret's reach
+	int standoffCheckFrame = -1000;
+	int standoffHoldUntil = -1;
+	int standoffLogFrame = -1000;
+	int standoffLogTurret = -1;
+	bool StandoffHold(const float3& toward, const char* why);
+
 	static constexpr int MAX_CLOSE_IN_RETRY_TICKS = 30;
 	static constexpr int BUGGER_OFF_TTL = 200;
 

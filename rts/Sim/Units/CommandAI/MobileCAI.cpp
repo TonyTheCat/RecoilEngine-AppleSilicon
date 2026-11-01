@@ -33,6 +33,25 @@
 
 #define AUTO_GENERATE_ATTACK_ORDERS 1
 
+#define LOG_SECTION_THREAT_TARGET "ThreatTarget"
+LOG_REGISTER_SECTION_GLOBAL(LOG_SECTION_THREAT_TARGET)
+
+// how often an automatic attack on an unarmed unit looks for an armed enemy
+static constexpr int THREAT_RECHECK_FRAMES = 15;
+
+#define LOG_SECTION_STANDOFF "Standoff"
+LOG_REGISTER_SECTION_GLOBAL(LOG_SECTION_STANDOFF)
+
+// Standoff (gameplay branch, see GAMEPLAY.md): automatic movement (a fight order's
+// advance, closing in on an automatic target) never steps from outside into the reach
+// of an armed enemy building it can see; the unit holds at the edge instead and
+// fires from there if its own weapons reach.
+static constexpr float STANDOFF_MARGIN = 60.0f;   // stays this far outside the reach
+static constexpr float STANDOFF_STEP = 150.0f;    // looks this far along the way
+static constexpr float STANDOFF_RANGE_CAP = 1200.0f;
+static constexpr int STANDOFF_CHECK_FRAMES = 8;
+static constexpr int STANDOFF_LOG_FRAMES = 150;
+
 // MobileCAI is not always assigned to aircraft
 static AAirMoveType* GetAirMoveType(const CUnit* owner) {
 	assert(owner->unitDef->IsAirUnit());
@@ -80,6 +99,10 @@ CR_REG_METADATA(CMobileCAI, (
 	CR_MEMBER(lastBuggerOffTime),
 	CR_MEMBER(buggerOffAttempts),
 	CR_MEMBER(lastIdleCheck),
+	CR_MEMBER(standoffCheckFrame),
+	CR_MEMBER(standoffHoldUntil),
+	CR_MEMBER(standoffLogFrame),
+	CR_MEMBER(standoffLogTurret),
 
 	CR_PREALLOC(GetPreallocContainer)
 ))
@@ -569,7 +592,87 @@ void CMobileCAI::ExecuteFight(Command& c)
 		}
 	}
 
+	if (owner->fireState >= FIRESTATE_FIREATWILL && StandoffHold(c.GetPos(0), "fight advance"))
+		return;
+
 	ExecuteMove(c);
+}
+
+bool CMobileCAI::StandoffHold(const float3& toward, const char* why)
+{
+	RECOIL_DETAILED_TRACY_ZONE;
+	if (owner->weapons.empty() || owner->unitDef->IsImmobileUnit())
+		return false;
+
+	if (gs->frameNum < standoffHoldUntil) {
+		StopMove();
+		return true;
+	}
+	if (gs->frameNum < standoffCheckFrame + STANDOFF_CHECK_FRAMES)
+		return false;
+
+	standoffCheckFrame = gs->frameNum;
+
+	float3 dir = toward - owner->pos;
+	dir.y = 0.0f;
+	const float dist = dir.Length2D();
+
+	if (dist <= 1.0f)
+		return false;
+
+	const float3 next = owner->pos + dir * (std::min(STANDOFF_STEP, dist) / dist);
+
+	QuadFieldQuery qfQuery;
+	quadField.GetUnitsExact(qfQuery, owner->pos, STANDOFF_RANGE_CAP + STANDOFF_MARGIN + STANDOFF_STEP, false);
+
+	for (const CUnit* u: *qfQuery.units) {
+		if (teamHandler.Ally(owner->allyteam, u->allyteam) || u->IsNeutral() || u->beingBuilt)
+			continue;
+		if (!u->unitDef->IsImmobileUnit() || u->weapons.empty())
+			continue;
+		// its type must be known: in sight now or seen before
+		if (!(u->losStatus[owner->allyteam] & (LOS_INLOS | LOS_PREVLOS)))
+			continue;
+
+		float reach = 0.0f;
+
+		for (const CWeapon* w: u->weapons) {
+			if (w->weaponDef->isShield || w->weaponDef->interceptor != 0)
+				continue;
+			if ((w->onlyTargetCategory & owner->category) == 0)
+				continue;
+
+			reach = std::max(reach, w->range);
+		}
+
+		if (reach <= 0.0f)
+			continue;
+
+		reach = std::min(reach, STANDOFF_RANGE_CAP) + STANDOFF_MARGIN;
+
+		// already inside: the fight is on, nothing to hold for
+		if (owner->pos.SqDistance2D(u->pos) <= Square(reach))
+			continue;
+		if (next.SqDistance2D(u->pos) > Square(reach))
+			continue;
+
+		standoffHoldUntil = gs->frameNum + STANDOFF_CHECK_FRAMES;
+
+		if (standoffLogTurret != u->id || gs->frameNum >= standoffLogFrame + STANDOFF_LOG_FRAMES) {
+			standoffLogTurret = u->id;
+			standoffLogFrame = gs->frameNum;
+			LOG_SL(LOG_SECTION_STANDOFF, L_NOTICE,
+				"unit %d (%s) at (%.0f, %.0f) holds before %s %d (%s) at (%.0f, %.0f): its reach %.0f, %.0f away, own range %.0f (%s)",
+				owner->id, owner->unitDef->name.c_str(), owner->pos.x, owner->pos.z,
+				u->unitDef->name.c_str(), u->id, u->unitDef->humanName.c_str(), u->pos.x, u->pos.z,
+				reach - STANDOFF_MARGIN, owner->pos.distance2D(u->pos), owner->maxRange, why);
+		}
+
+		StopMove();
+		return true;
+	}
+
+	return false;
 }
 
 bool CMobileCAI::IsValidTarget(const CUnit* enemy, CWeapon* weapon) const {
@@ -822,6 +925,9 @@ void CMobileCAI::ExecuteObjectAttack(Command& c)
 		// if the target is outside LOS, this goes to its approximate position (errPos != pos)
 		// otherwise it will move us to the exact target position which should fix issues with
 		// low-range (mainly melee) weapons
+		if (tempOrder && StandoffHold(targetErrPos, "closing in"))
+			return;
+
 		SetGoal(targetErrPos - norm * CalcTargetRadius(orderTarget, orderTarget->radius, edgeFactor * 0.8f), owner->pos);
 		if (lastCloseInTry < (gs->frameNum + MAX_CLOSE_IN_RETRY_TICKS)) {
 			if (tryOwnerRotation)
@@ -898,6 +1004,25 @@ void CMobileCAI::ExecuteAttack(Command& c)
 		if (owner->moveState < MOVESTATE_ROAM && curTargetDist > maxTargetDist) {
 			StopMoveAndFinishCommand();
 			return;
+		}
+	}
+
+	// an automatic attack (from a fight, patrol or idle search) on a unit with no
+	// weapons gives way to an armed enemy in range (gameplay branch, see GAMEPLAY.md)
+	if (inCommand == CMD_ATTACK && tempOrder && orderTarget != nullptr && orderTarget->weapons.empty() &&
+		c.GetNumParams() == 1 && ((gs->frameNum + owner->id) % THREAT_RECHECK_FRAMES) == 0)
+	{
+		const CUnit* threat = CGameHelper::GetClosestValidTarget(owner->pos, owner->maxRange, owner->allyteam, this);
+
+		if (threat != nullptr && threat != orderTarget && !threat->weapons.empty()) {
+			LOG_SL(LOG_SECTION_THREAT_TARGET, L_NOTICE,
+				"unit %d (%s) at (%.0f, %.0f) leaves unarmed %s %d for armed %s %d at (%.0f, %.0f)",
+				owner->id, owner->unitDef->name.c_str(), owner->pos.x, owner->pos.z,
+				orderTarget->unitDef->name.c_str(), orderTarget->id,
+				threat->unitDef->name.c_str(), threat->id, threat->pos.x, threat->pos.z);
+
+			c.SetParam(0, threat->id);
+			inCommand = CMD_STOP;
 		}
 	}
 

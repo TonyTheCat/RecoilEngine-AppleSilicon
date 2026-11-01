@@ -2,6 +2,7 @@
 
 
 #include "StrafeAirMoveType.h"
+#include "Game/GameHelper.h"
 #include "Game/Players/Player.h"
 #include "Map/Ground.h"
 #include "Map/MapInfo.h"
@@ -18,7 +19,15 @@
 #include "System/SpringMath.h"
 #include "System/SpringHash.h"
 
+#include "System/Log/ILog.h"
+#include <unordered_map>
 #include "System/Misc/TracyDefs.h"
+
+#define LOG_SECTION_AIR_SAFETY "AirSafety"
+LOG_REGISTER_SECTION_GLOBAL(LOG_SECTION_AIR_SAFETY)
+
+// an aircraft with nothing left to do circles instead of landing when an armed enemy is this close
+static constexpr float NO_LANDING_ENEMY_RADIUS = 1500.0f;
 
 CR_BIND_DERIVED(CStrafeAirMoveType, AAirMoveType, (nullptr))
 
@@ -1354,6 +1363,22 @@ void CStrafeAirMoveType::StopMoving(bool callScript, bool hardStop, bool)
 		return;
 
 	if (dontLand || !autoLand) {
+		SetState(AIRCRAFT_FLYING);
+		return;
+	}
+
+	// gameplay branch (see GAMEPLAY.md): never come down next to an armed enemy
+	if (const CUnit* enemy = CGameHelper::GetArmedEnemyNear(owner, NO_LANDING_ENEMY_RADIUS)) {
+		// one line per aircraft per 10 seconds
+		static std::unordered_map<int, int> lastLogged;
+		int& last = lastLogged[owner->id];
+		if (gs->frameNum - last >= 300 || last > gs->frameNum) {
+			last = gs->frameNum;
+			LOG_SL(LOG_SECTION_AIR_SAFETY, L_NOTICE,
+				"aircraft %d (%s) at (%.0f, %.0f) stays up: armed enemy %d (%s) at (%.0f, %.0f)",
+				owner->id, owner->unitDef->name.c_str(), owner->pos.x, owner->pos.z,
+				enemy->id, enemy->unitDef->name.c_str(), enemy->pos.x, enemy->pos.z);
+		}
 		SetState(AIRCRAFT_FLYING);
 		return;
 	}
