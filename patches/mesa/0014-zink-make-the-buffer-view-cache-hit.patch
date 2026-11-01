@@ -1,0 +1,49 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Anton <anton.shishenja@gmail.com>
+Date: Sun, 1 Nov 2026 18:50:00 -0300
+Subject: [PATCH] zink: make the buffer view cache hit
+
+zink_bufferview_key has a 12-bit format bitfield and is hashed and compared as raw bytes. The set compares the lookup key against the stored zink_buffer_view (whose first member is pres), not its key, so it never matched. Brace-initialising the key also leaves the padding bits as stack garbage, so get_buffer_view never hits its cache and creates (and keeps) a new VkBufferView plus Metal texture on every image-buffer bind. Seen as ~40 buffer views per second leaking while the GPU-pack present path reads the frame into a PBO.
+---
+ src/gallium/drivers/zink/zink_context.c | 11 +++++++----
+ 2 files changed, 10 insertions(+), 5 deletions(-)
+
+diff --git a/src/gallium/drivers/zink/zink_context.c b/src/gallium/drivers/zink/zink_context.c
+--- a/src/gallium/drivers/zink/zink_context.c
++++ b/src/gallium/drivers/zink/zink_context.c
+@@ -997,11 +997,14 @@ get_buffer_view(struct zink_context *ctx, struct zink_resource *res, enum pipe_f
+ {
+    struct zink_screen *screen = zink_screen(ctx->base.screen);
+    struct zink_buffer_view *buffer_view = NULL;
+-   struct zink_bufferview_key key = {
+-      format,
+-      offset,
+-      size
+-   };
++   /* the key is hashed and compared as raw bytes and `format` is a bitfield:
++    * zero it first or the padding bits are stack garbage, every lookup misses
++    * and a new VkBufferView is created (and kept) per call */
++   struct zink_bufferview_key key;
++   memset(&key, 0, sizeof(key));
++   key.format = format;
++   key.offset = offset;
++   key.size = size;
+    VkBufferViewCreateInfo bvci = create_bvci(ctx, res, format, offset, size);
+ 
+    uint32_t hash = hash_bufferview_key(&key);
+diff --git a/src/gallium/drivers/zink/zink_resource.c b/src/gallium/drivers/zink/zink_resource.c
+--- a/src/gallium/drivers/zink/zink_resource.c
++++ b/src/gallium/drivers/zink/zink_resource.c
+@@ -183,7 +183,9 @@ zink_resource_object_init_mutable(struct zink_context *ctx, struct zink_resource
+ static bool
+ equals_bufferview_key(const void *a, const void *b)
+ {
+-   return memcmp(a, b, sizeof(struct zink_bufferview_key)) == 0;
++   /* b is the stored zink_buffer_view, not its key */
++   const struct zink_buffer_view *bv = b;
++   return memcmp(a, &bv->key, sizeof(struct zink_bufferview_key)) == 0;
+ }
+ 
+ static void
+-- 
+2.50.0
