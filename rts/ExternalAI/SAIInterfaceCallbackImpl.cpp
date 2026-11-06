@@ -33,12 +33,13 @@ static std::vector<const CAIInterfaceLibraryInfo*> infos;
 
 void CHECK_INTERFACE_ID(const int interfaceId)
 {
-	if (interfaceId < 0 || (size_t)interfaceId >= infos.size()) {
-		std::ostringstream buf;
-		buf << "Bad AI Interface ID supplied by an interface.\n";
-		buf << "Is " << interfaceId << ", but should be between min 0 and max " << infos.size() << ".";
-		aiInterfaceCallback_Log_exception(interfaceId, buf.str().c_str(), 1, true);
-	}
+	if (interfaceId >= 0 && (size_t)interfaceId < infos.size() && infos[interfaceId] != nullptr)
+		return;
+
+	// log directly: aiInterfaceCallback_Log_exception checks the id itself,
+	// so reporting through it recursed until the stack ran out
+	LOG_L(L_ERROR, "Bad AI Interface ID supplied by an interface: is %i, but should be between min 0 and max %u (and still loaded).",
+		interfaceId, (unsigned) infos.size());
 }
 
 
@@ -354,7 +355,7 @@ int aiInterfaceCallback_getInstanceFor(const CAIInterfaceLibraryInfo* info, stru
 
 	size_t i;
 	for (i = 0; i <  infos.size(); ++i) {
-		if (infos[i] == info) {
+		if (infos[i] == info && info != nullptr) {
 			interfaceId = i;
 			break;
 		}
@@ -370,7 +371,10 @@ int aiInterfaceCallback_getInstanceFor(const CAIInterfaceLibraryInfo* info, stru
 }
 void aiInterfaceCallback_release(int interfaceId) {
 
-	CHECK_INTERFACE_ID(interfaceId);
+	// releasing an interface twice (or one that never registered) is harmless
+	if (interfaceId < 0 || (size_t)interfaceId >= infos.size())
+		return;
 
-	infos.erase(infos.begin() + interfaceId);
+	// keep the slot: erasing would shift the ids other loaded interfaces hold
+	infos[interfaceId] = nullptr;
 }
