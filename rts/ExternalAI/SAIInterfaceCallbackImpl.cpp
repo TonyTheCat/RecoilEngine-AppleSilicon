@@ -25,20 +25,31 @@
 #include <cstdlib> // malloc(), calloc(), free()
 #include <sstream> // ostringstream
 #include <cstring>
+#include <set>
+#include <mutex>
 
 
 static const char* AI_INTERFACES_VERSION_COMMON = "common";
 
 static std::vector<const CAIInterfaceLibraryInfo*> infos;
 
-void CHECK_INTERFACE_ID(const int interfaceId)
+// true if the id belongs to a loaded interface; callers must not use infos[id] otherwise
+static bool CHECK_INTERFACE_ID(const int interfaceId)
 {
-	if (interfaceId < 0 || (size_t)interfaceId >= infos.size()) {
-		std::ostringstream buf;
-		buf << "Bad AI Interface ID supplied by an interface.\n";
-		buf << "Is " << interfaceId << ", but should be between min 0 and max " << infos.size() << ".";
-		aiInterfaceCallback_Log_exception(interfaceId, buf.str().c_str(), 1, true);
+	if (interfaceId >= 0 && (size_t)interfaceId < infos.size() && infos[interfaceId] != nullptr)
+		return true;
+
+	// once per id, an AI that keeps calling after its interface went away would flood the log;
+	// logged directly: aiInterfaceCallback_Log_exception checks the id itself, so reporting
+	// through it recursed until the stack ran out
+	static std::set<int> reported;
+	static std::mutex reportedMutex; // AI threads call in
+	std::lock_guard<std::mutex> lock(reportedMutex);
+	if (reported.insert(interfaceId).second) {
+		LOG_L(L_ERROR, "Bad AI Interface ID supplied by an interface: is %i, but should be between min 0 and max %u (and still loaded).",
+			interfaceId, (unsigned) infos.size());
 	}
+	return false;
 }
 
 
@@ -90,35 +101,40 @@ EXPORT(const char*) aiInterfaceCallback_Engine_Version_getFull(int UNUSED_interf
 
 
 EXPORT(int) aiInterfaceCallback_AIInterface_Info_getSize(int interfaceId) {
-	CHECK_INTERFACE_ID(interfaceId);
+	if (!CHECK_INTERFACE_ID(interfaceId))
+		return 0;
 
 	const CAIInterfaceLibraryInfo* info = infos[interfaceId];
 	return (int)info->size();
 }
 
 EXPORT(const char*) aiInterfaceCallback_AIInterface_Info_getKey(int interfaceId, int infoIndex) {
-	CHECK_INTERFACE_ID(interfaceId);
+	if (!CHECK_INTERFACE_ID(interfaceId))
+		return "";
 
 	const CAIInterfaceLibraryInfo* info = infos[interfaceId];
 	return info->GetKeyAt(infoIndex).c_str();
 }
 
 EXPORT(const char*) aiInterfaceCallback_AIInterface_Info_getValue(int interfaceId, int infoIndex) {
-	CHECK_INTERFACE_ID(interfaceId);
+	if (!CHECK_INTERFACE_ID(interfaceId))
+		return "";
 
 	const CAIInterfaceLibraryInfo* info = infos[interfaceId];
 	return info->GetValueAt(infoIndex).c_str();
 }
 
 EXPORT(const char*) aiInterfaceCallback_AIInterface_Info_getDescription(int interfaceId, int infoIndex) {
-	CHECK_INTERFACE_ID(interfaceId);
+	if (!CHECK_INTERFACE_ID(interfaceId))
+		return "";
 
 	const CAIInterfaceLibraryInfo* info = infos[interfaceId];
 	return info->GetDescriptionAt(infoIndex).c_str();
 }
 
 EXPORT(const char*) aiInterfaceCallback_AIInterface_Info_getValueByKey(int interfaceId, const char* const key) {
-	CHECK_INTERFACE_ID(interfaceId);
+	if (!CHECK_INTERFACE_ID(interfaceId))
+		return "";
 
 	const CAIInterfaceLibraryInfo* info = infos[interfaceId];
 	return info->GetInfo(key).c_str();
@@ -162,7 +178,8 @@ EXPORT(const char*) aiInterfaceCallback_SkirmishAI_Info_getValueByKey(
 }
 
 EXPORT(void) aiInterfaceCallback_Log_log(int interfaceId, const char* const msg) {
-	CHECK_INTERFACE_ID(interfaceId);
+	if (!CHECK_INTERFACE_ID(interfaceId))
+		return;
 
 	const CAIInterfaceLibraryInfo* info = infos[interfaceId];
 
@@ -170,14 +187,16 @@ EXPORT(void) aiInterfaceCallback_Log_log(int interfaceId, const char* const msg)
 }
 
 EXPORT(void) aiInterfaceCallback_Log_logsl(int interfaceId, const char* section, int loglevel, const char* const msg) {
-	CHECK_INTERFACE_ID(interfaceId);
+	if (!CHECK_INTERFACE_ID(interfaceId))
+		return;
 
 	log_frontend_record(loglevel, section, "%s", msg);
 }
 
 
 EXPORT(void) aiInterfaceCallback_Log_exception(int interfaceId, const char* const msg, int severety, bool die) {
-	CHECK_INTERFACE_ID(interfaceId);
+	if (!CHECK_INTERFACE_ID(interfaceId))
+		return;
 
 	const CAIInterfaceLibraryInfo* info = infos[interfaceId];
 
@@ -249,7 +268,8 @@ EXPORT(bool) aiInterfaceCallback_DataDirs_Roots_locatePath(
 }
 
 EXPORT(const char*) aiInterfaceCallback_DataDirs_getConfigDir(int interfaceId) {
-	CHECK_INTERFACE_ID(interfaceId);
+	if (!CHECK_INTERFACE_ID(interfaceId))
+		return "";
 	return infos[interfaceId]->GetDataDir().c_str();
 }
 
@@ -278,7 +298,8 @@ EXPORT(bool) aiInterfaceCallback_DataDirs_locatePath(int interfaceId, char* path
 static std::vector<std::string> writeableDataDirs;
 
 EXPORT(const char*) aiInterfaceCallback_DataDirs_getWriteableDir(int interfaceId) {
-	CHECK_INTERFACE_ID(interfaceId);
+	if (!CHECK_INTERFACE_ID(interfaceId))
+		return nullptr;
 
 	// fill up writeableDataDirs until interfaceId index is in there
 	// if it is not yet
@@ -354,7 +375,7 @@ int aiInterfaceCallback_getInstanceFor(const CAIInterfaceLibraryInfo* info, stru
 
 	size_t i;
 	for (i = 0; i <  infos.size(); ++i) {
-		if (infos[i] == info) {
+		if (infos[i] == info && info != nullptr) {
 			interfaceId = i;
 			break;
 		}
@@ -370,7 +391,10 @@ int aiInterfaceCallback_getInstanceFor(const CAIInterfaceLibraryInfo* info, stru
 }
 void aiInterfaceCallback_release(int interfaceId) {
 
-	CHECK_INTERFACE_ID(interfaceId);
+	// releasing an interface twice (or one that never registered) is harmless
+	if (interfaceId < 0 || (size_t)interfaceId >= infos.size())
+		return;
 
-	infos.erase(infos.begin() + interfaceId);
+	// keep the slot: erasing would shift the ids other loaded interfaces hold
+	infos[interfaceId] = nullptr;
 }
