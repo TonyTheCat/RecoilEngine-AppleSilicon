@@ -52,10 +52,20 @@ fi
 # atomic primitive; a dead owner (crash, force-quit) is detected by pid
 # liveness and the lock reclaimed. Held for our whole lifetime — the exec'd
 # engine keeps our pid, so a second launch while playing is also refused.
+# A live pid alone is not proof: the lock outlives its owner, and macOS hands
+# the dead owner's pid to an unrelated process, which refused every launch.
+# The owner is a launcher or the engine it exec'd, in any copy of the app.
 LOCK="$WRITEDIR/.launcher-lock"
+lock_owner_alive() {
+  [ -n "$1" ] || return 1
+  case "$(ps -p "$1" -o command= 2>/dev/null)" in
+    */Contents/MacOS/launcher*|*/Contents/MacOS/spring*) return 0 ;;
+  esac
+  return 1
+}
 if ! mkdir "$LOCK" 2>/dev/null; then
   OLDPID=$(cat "$LOCK/pid" 2>/dev/null)
-  if [ -n "$OLDPID" ] && kill -0 "$OLDPID" 2>/dev/null; then
+  if lock_owner_alive "$OLDPID"; then
     fail_dialog "Beyond All Reason is already running or updating. If you cannot find its window, wait a few seconds and try again."
     exit 0
   fi
