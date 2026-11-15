@@ -305,6 +305,15 @@ echo 99999999 > "$WD16/.launcher-lock/pid"    # no such pid
 run "$WD16" BAR_ASSUME_CONSENT=1
 has spring-launched && ok "dead-pid lock reclaimed, launch proceeds" || bad "stale lock" "$(calls)"
 
+echo "== stale lock whose pid now belongs to an unrelated process is reclaimed =="
+WD17="$ROOT/w17"; mkdir -p "$WD17/.launcher-lock"; : > "$WD17/.lobby-installed"
+sleep 30 & OTHER=$!                              # a live pid that is not a launcher or engine
+echo "$OTHER" > "$WD17/.launcher-lock/pid"
+run "$WD17" BAR_ASSUME_CONSENT=1
+kill "$OTHER" 2>/dev/null
+{ ! has osascript && has spring-launched; } \
+  && ok "reused-pid lock reclaimed, launch proceeds" || bad "reused-pid lock" "$(calls)"
+
 echo
 echo "RESULT: $pass passed, $fail failed"
 [ "$fail" = 0 ]
